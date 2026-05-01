@@ -522,6 +522,7 @@ func TestRunDelete_JSONOutputEmitsText(t *testing.T) {
 }
 
 func TestRunTypes(t *testing.T) {
+	isolateCache(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"issueLinkTypes": []map[string]string{
@@ -546,7 +547,7 @@ func TestRunTypes(t *testing.T) {
 }
 
 func TestRunTypes_IDOnly(t *testing.T) {
-	t.Parallel()
+	isolateCache(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"issueLinkTypes": []map[string]string{
@@ -567,6 +568,83 @@ func TestRunTypes_IDOnly(t *testing.T) {
 	err = runTypes(context.Background(), opts, "")
 	testutil.RequireNoError(t, err)
 	testutil.Equal(t, stdout.String(), "1\n2\n")
+}
+
+func TestRunTypes_FreshCacheSkipsLive(t *testing.T) {
+	isolateCache(t)
+	testutil.RequireNoError(t, cache.WriteResource("linktypes", "24h", []api.IssueLinkType{
+		{ID: "1", Name: "Blocks", Inward: "is blocked by", Outward: "blocks"},
+		{ID: "2", Name: "Relates", Inward: "relates to", Outward: "relates to"},
+	}))
+
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Fatal("live API must not be called when linktypes cache is fresh")
+	}))
+	defer server.Close()
+
+	client, err := api.New(api.ClientConfig{URL: server.URL, Email: "t@t.com", APIToken: "tok"})
+	testutil.RequireNoError(t, err)
+
+	var stdout bytes.Buffer
+	opts := &root.Options{Output: "table", Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	opts.SetAPIClient(client)
+
+	err = runTypes(context.Background(), opts, "")
+	testutil.RequireNoError(t, err)
+	testutil.Contains(t, stdout.String(), "Blocks")
+	testutil.Contains(t, stdout.String(), "Relates")
+}
+
+func TestRunTypes_FreshCacheSkipsLive_IDOnly(t *testing.T) {
+	isolateCache(t)
+	testutil.RequireNoError(t, cache.WriteResource("linktypes", "24h", []api.IssueLinkType{
+		{ID: "1", Name: "Blocks", Inward: "is blocked by", Outward: "blocks"},
+		{ID: "2", Name: "Relates", Inward: "relates to", Outward: "relates to"},
+	}))
+
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Fatal("live API must not be called when linktypes cache is fresh")
+	}))
+	defer server.Close()
+
+	client, err := api.New(api.ClientConfig{URL: server.URL, Email: "t@t.com", APIToken: "tok"})
+	testutil.RequireNoError(t, err)
+
+	var stdout bytes.Buffer
+	opts := &root.Options{Stdout: &stdout, Stderr: &bytes.Buffer{}, IDOnly: true}
+	opts.SetAPIClient(client)
+
+	err = runTypes(context.Background(), opts, "")
+	testutil.RequireNoError(t, err)
+	testutil.Equal(t, stdout.String(), "1\n2\n")
+}
+
+func TestRunTypes_FreshCacheSkipsLive_JSON(t *testing.T) {
+	isolateCache(t)
+	testutil.RequireNoError(t, cache.WriteResource("linktypes", "24h", []api.IssueLinkType{
+		{ID: "1", Name: "Blocks", Inward: "is blocked by", Outward: "blocks"},
+	}))
+
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		t.Fatal("live API must not be called when linktypes cache is fresh")
+	}))
+	defer server.Close()
+
+	client, err := api.New(api.ClientConfig{URL: server.URL, Email: "t@t.com", APIToken: "tok"})
+	testutil.RequireNoError(t, err)
+
+	var stdout bytes.Buffer
+	opts := &root.Options{Output: "json", Stdout: &stdout, Stderr: &bytes.Buffer{}}
+	opts.SetAPIClient(client)
+
+	err = runTypes(context.Background(), opts, "")
+	testutil.RequireNoError(t, err)
+
+	var types []api.IssueLinkType
+	err = json.Unmarshal(stdout.Bytes(), &types)
+	testutil.RequireNoError(t, err)
+	testutil.Equal(t, len(types), 1)
+	testutil.Equal(t, types[0].Name, "Blocks")
 }
 
 func TestFindCreatedLink_MatchByName(t *testing.T) {
