@@ -42,9 +42,9 @@ func (c *Client) GetCustomFields(ctx context.Context) ([]Field, error) {
 	return customFields, nil
 }
 
-// FindFieldByName finds a field by name (case-insensitive)
+// FindFieldByName finds a field by name (case-insensitive, whitespace-trimmed).
 func FindFieldByName(fields []Field, name string) *Field {
-	nameLower := strings.ToLower(name)
+	nameLower := strings.ToLower(strings.TrimSpace(name))
 	for i := range fields {
 		if strings.ToLower(fields[i].Name) == nameLower {
 			return &fields[i]
@@ -53,14 +53,36 @@ func FindFieldByName(fields []Field, name string) *Field {
 	return nil
 }
 
-// FindFieldByID finds a field by ID
+// FindFieldByID finds a field by ID (whitespace-trimmed).
 func FindFieldByID(fields []Field, id string) *Field {
+	id = strings.TrimSpace(id)
 	for i := range fields {
 		if fields[i].ID == id {
 			return &fields[i]
 		}
 	}
 	return nil
+}
+
+// ResolveFieldArg parses a "key=value" field argument, trims whitespace from
+// the key, and resolves it against the known field list (by name first, then
+// by ID). The value after the first "=" is passed through verbatim.
+func ResolveFieldArg(fields []Field, arg string) (fieldID string, field *Field, value string, err error) {
+	parts := strings.SplitN(arg, "=", 2)
+	if len(parts) != 2 {
+		return "", nil, "", fmt.Errorf("invalid field format: %s (expected key=value)", arg)
+	}
+
+	key := strings.TrimSpace(parts[0])
+	value = parts[1]
+
+	if resolved := FindFieldByName(fields, key); resolved != nil {
+		return resolved.ID, resolved, value, nil
+	}
+	if resolved := FindFieldByID(fields, key); resolved != nil {
+		return resolved.ID, resolved, value, nil
+	}
+	return key, nil, value, nil
 }
 
 // ResolveFieldID resolves a field name or ID to its ID
@@ -100,44 +122,48 @@ func FormatFieldValue(field *Field, value string) any {
 		return NewADFDocument(value)
 	}
 
+	// Trim whitespace for structured field types where leading/trailing spaces
+	// are never meaningful. Free-text fields (textarea above, default below)
+	// preserve the original value.
+	trimmed := strings.TrimSpace(value)
+
 	// The parent field requires {"key": "..."} format but Jira reports an empty
 	// schema type for it, so handle it before the type switch.
 	if field.ID == "parent" {
-		if _, err := strconv.Atoi(value); err == nil {
-			return map[string]string{"id": value}
+		if _, err := strconv.Atoi(trimmed); err == nil {
+			return map[string]string{"id": trimmed}
 		}
-		return map[string]string{"key": value}
+		return map[string]string{"key": trimmed}
 	}
 
 	switch field.Schema.Type {
 	case "option":
-		return map[string]string{"value": value}
+		return map[string]string{"value": trimmed}
 	case "array":
 		if field.Schema.Items == "option" {
-			return []map[string]string{{"value": value}}
+			return []map[string]string{{"value": trimmed}}
 		}
-		return []string{value}
+		return []string{trimmed}
 	case "user":
-		if IsNullValue(value) {
+		if IsNullValue(trimmed) {
 			return nil
 		}
-		return map[string]string{"accountId": value}
+		return map[string]string{"accountId": trimmed}
 	case "number":
-		if n, err := strconv.ParseFloat(value, 64); err == nil {
+		if n, err := strconv.ParseFloat(trimmed, 64); err == nil {
 			return n
 		}
-		return value
+		return trimmed
 	case "issuelink":
-		// Issue link fields (e.g., parent) need {"key": "..."} or {"id": "..."} format
-		if _, err := strconv.Atoi(value); err == nil {
-			return map[string]string{"id": value}
+		if _, err := strconv.Atoi(trimmed); err == nil {
+			return map[string]string{"id": trimmed}
 		}
-		return map[string]string{"key": value}
+		return map[string]string{"key": trimmed}
 	case "priority", "resolution", "status", "issuetype", "securitylevel":
-		if _, err := strconv.Atoi(value); err == nil {
-			return map[string]string{"id": value}
+		if _, err := strconv.Atoi(trimmed); err == nil {
+			return map[string]string{"id": trimmed}
 		}
-		return map[string]string{"name": value}
+		return map[string]string{"name": trimmed}
 	default:
 		return value
 	}
