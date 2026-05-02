@@ -20,7 +20,7 @@ Run these commands and capture the values. They are referenced as `$VARIABLES` t
 
 ```bash
 # $ACCOUNT_ID — your Atlassian account ID (required for authorAccountId and actor)
-jtk me -o json | jq -r .accountId
+jtk me --id
 
 # $PROJECT — pick a project you have full access to
 jtk projects list --max 10
@@ -30,22 +30,24 @@ curl -s https://YOUR-SITE.atlassian.net/_edge/tenant_info | jq -r .cloudId
 
 # $PROJECT_ARI — construct from cloud ID and project ID
 # Format: ari:cloud:jira:$CLOUD_ID:project/$PROJECT_ID
-jtk projects get $PROJECT -o json | jq -r '.id'
-# → ari:cloud:jira:$CLOUD_ID:project/$PROJECT_ID
+jtk projects get $PROJECT --extended
+# Find the numeric project ID in the extended output, then construct:
+# ari:cloud:jira:$CLOUD_ID:project/$PROJECT_ID
 
 # $CUSTOM_SELECT_FIELD — a single-select custom field ID
-jtk fields list --custom -o json | jq '.[] | select(.schema.custom | test("select$")) | {id, name}'
-# Note the ID (e.g., customfield_10037) and name (e.g., "Banking Platform")
+# List custom fields and find one with "select" type (e.g., "Banking Platform")
+jtk fields list --custom
+# Note the ID (e.g., customfield_10037) of a single-select field
 
 # $CUSTOM_MULTISELECT_FIELD — a multi-select/checkbox custom field ID
-jtk fields list --custom -o json | jq '.[] | select(.schema.custom | test("multi|checkbox")) | {id, name}'
-# Note the ID (e.g., customfield_10038) and name (e.g., "Products")
+# From the same listing, find one with "multi" or "checkbox" type (e.g., "Products")
+# Note the ID (e.g., customfield_10038)
 
 # $SELECT_OPTION_ID — an option ID for the select field
-jtk fields options list $CUSTOM_SELECT_FIELD -o json | jq '.[0].id'
+jtk fields options list $CUSTOM_SELECT_FIELD --id
 
 # $MULTISELECT_OPTION_ID — an option ID for the multiselect field
-jtk fields options list $CUSTOM_MULTISELECT_FIELD -o json | jq '.[0].id'
+jtk fields options list $CUSTOM_MULTISELECT_FIELD --id
 
 # $EXISTING_AUTO_UUID — an existing automation rule to use as round-trip reference
 jtk auto list --state ENABLED --max 5
