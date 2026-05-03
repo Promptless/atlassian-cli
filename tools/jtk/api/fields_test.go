@@ -441,6 +441,76 @@ func TestFormatFieldValue(t *testing.T) {
 			value: "20001",
 			want:  map[string]string{"id": "20001"},
 		},
+		{
+			name: "array of component by numeric id wraps as id map",
+			field: &Field{
+				ID:     "components",
+				Name:   "Components",
+				Schema: FieldSchema{Type: "array", Items: "component"},
+			},
+			value: "10201",
+			want:  []map[string]string{{"id": "10201"}},
+		},
+		{
+			name: "array of component by name wraps as name map",
+			field: &Field{
+				ID:     "components",
+				Name:   "Components",
+				Schema: FieldSchema{Type: "array", Items: "component"},
+			},
+			value: "Service 2",
+			want:  []map[string]string{{"name": "Service 2"}},
+		},
+		{
+			name: "array of version by numeric id wraps as id map",
+			field: &Field{
+				ID:     "fixVersions",
+				Name:   "Fix Versions",
+				Schema: FieldSchema{Type: "array", Items: "version"},
+			},
+			value: "10100",
+			want:  []map[string]string{{"id": "10100"}},
+		},
+		{
+			name: "array of version by name wraps as name map",
+			field: &Field{
+				ID:     "fixVersions",
+				Name:   "Fix Versions",
+				Schema: FieldSchema{Type: "array", Items: "version"},
+			},
+			value: "v1.0.0",
+			want:  []map[string]string{{"name": "v1.0.0"}},
+		},
+		{
+			name: "array of group falls through to plain string array (regression guard)",
+			field: &Field{
+				ID:     "customfield_10099",
+				Name:   "Reviewers",
+				Schema: FieldSchema{Type: "array", Items: "group"},
+			},
+			value: "jira-administrators",
+			want:  []string{"jira-administrators"},
+		},
+		{
+			name: "array of component with surrounding whitespace trims and treats as id",
+			field: &Field{
+				ID:     "components",
+				Name:   "Components",
+				Schema: FieldSchema{Type: "array", Items: "component"},
+			},
+			value: "  10201  ",
+			want:  []map[string]string{{"id": "10201"}},
+		},
+		{
+			name: "array of component with leading-digit name takes name path",
+			field: &Field{
+				ID:     "components",
+				Name:   "Components",
+				Schema: FieldSchema{Type: "array", Items: "component"},
+			},
+			value: "12abc",
+			want:  []map[string]string{{"name": "12abc"}},
+		},
 	}
 
 	for _, tt := range tests {
@@ -551,6 +621,24 @@ func TestMergeFieldValues(t *testing.T) {
 			existing: []string{"urgent"},
 			newVal:   []string{"backend"},
 			want:     []string{"urgent", "backend"},
+		},
+		{
+			name:     "merge component arrays (id form)",
+			existing: []map[string]string{{"id": "10200"}},
+			newVal:   []map[string]string{{"id": "10201"}},
+			want:     []map[string]string{{"id": "10200"}, {"id": "10201"}},
+		},
+		{
+			name:     "merge component arrays (name form)",
+			existing: []map[string]string{{"name": "Frontend"}},
+			newVal:   []map[string]string{{"name": "Backend"}},
+			want:     []map[string]string{{"name": "Frontend"}, {"name": "Backend"}},
+		},
+		{
+			name:     "merge component arrays (mixed id and name)",
+			existing: []map[string]string{{"id": "10200"}},
+			newVal:   []map[string]string{{"name": "Frontend"}},
+			want:     []map[string]string{{"id": "10200"}, {"name": "Frontend"}},
 		},
 		{
 			name:     "non-array field overwrites",
