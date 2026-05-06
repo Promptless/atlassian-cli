@@ -7,9 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/open-cli-collective/atlassian-go/auth"
 	sharedconfig "github.com/open-cli-collective/atlassian-go/config"
+	"github.com/open-cli-collective/atlassian-go/credstore"
 	"gopkg.in/yaml.v3"
 )
 
@@ -144,12 +146,75 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// LoadWithEnv loads configuration from file and overrides with environment variables.
+// LoadFromShared layers credentials from the shared store (default
+// merged with cfl override) on top of the receiver. URLs from the
+// shared store are stored as base; this method appends "/wiki" so the
+// receiver matches cfl's legacy URL convention.
+func (c *Config) LoadFromShared(s *credstore.Store) {
+	if s == nil {
+		return
+	}
+	r := s.Resolve(credstore.ToolCFL)
+	if r.URL != "" {
+		c.URL = credstore.URLForCFL(r.URL)
+	}
+	if r.Email != "" {
+		c.Email = r.Email
+	}
+	if r.APIToken != "" {
+		c.APIToken = r.APIToken
+	}
+	if r.AuthMethod != "" {
+		c.AuthMethod = r.AuthMethod
+	}
+	if r.CloudID != "" {
+		c.CloudID = r.CloudID
+	}
+	if s.CFL.DefaultSpace != "" {
+		c.DefaultSpace = s.CFL.DefaultSpace
+	}
+	if s.CFL.OutputFormat != "" {
+		c.OutputFormat = s.CFL.OutputFormat
+	}
+}
+
+var corruptSharedWarnOnce sync.Once
+
+func warnCorruptSharedOnce(err error) {
+	corruptSharedWarnOnce.Do(func() {
+		fmt.Fprintf(os.Stderr, "warning: shared credential store is unreadable (%v); falling back to per-tool config. Run `cfl init` to fix.\n", err)
+	})
+}
+
+// LoadWithEnv loads configuration with full precedence:
+//  1. legacy file (lowest)
+//  2. shared store default
+//  3. shared store cfl override
+//  4. ATLASSIAN_* env
+//  5. CFL_* env (highest)
+//
+// A corrupt shared store warns once on stderr and falls back to legacy
+// + env so a broken shared file doesn't crash every cfl command. Init
+// uses credstore.Load directly so it can surface the error and refuse
+// to overwrite.
 func LoadWithEnv(path string) (*Config, error) {
 	cfg, err := Load(path)
 	if err != nil {
-		// If file doesn't exist, start with empty config
+		// Legacy file missing or corrupt: start empty. cfl init has a
+		// separate detect-and-reconcile path that distinguishes those
+		// cases and refuses to clobber a corrupt legacy file.
 		cfg = &Config{}
+	}
+
+	store, sErr := credstore.Load(credstore.DefaultPath())
+	if sErr != nil {
+		// Runtime callers can't propagate the error meaningfully — every
+		// cfl command would die. Warn once on stderr and fall back to
+		// legacy + env. `cfl init` uses credstore.Load directly so it
+		// can surface the error and refuse to clobber.
+		warnCorruptSharedOnce(sErr)
+	} else {
+		cfg.LoadFromShared(store)
 	}
 
 	cfg.LoadFromEnv()

@@ -13,6 +13,7 @@ import (
 
 	"github.com/open-cli-collective/atlassian-go/auth"
 	sharedclient "github.com/open-cli-collective/atlassian-go/client"
+	"github.com/open-cli-collective/atlassian-go/credstore"
 	"github.com/open-cli-collective/atlassian-go/testutil"
 	"github.com/spf13/cobra"
 
@@ -121,9 +122,13 @@ func TestRunInit_InvalidAuthMethod(t *testing.T) {
 	testutil.Contains(t, err.Error(), "invalid auth method")
 }
 
-// finalizeInit tests use t.TempDir() for configPath and an httptest-backed
+// finalizeInit tests use t.TempDir() for paths and an httptest-backed
 // clientBuilder so the user's real config is never touched and no real
 // network call is made.
+
+func newFinalizeReconcileResult() *reconcileResult {
+	return &reconcileResult{store: &credstore.Store{}, target: writeDefault}
+}
 
 func newFinalizeOpts() *root.Options {
 	return &root.Options{
@@ -141,6 +146,59 @@ func userResponseServer(t *testing.T, body string, status int) *httptest.Server 
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(body))
 	}))
+}
+
+// TestFinalizeInit_WritesToCorrectSection verifies the saved YAML
+// routes credentials to the section named by writeTarget. A regression
+// in target selection (e.g. credentials landing in default when an
+// override was intended) would be silently invisible without this
+// readback assertion.
+func TestFinalizeInit_WritesToCorrectSection(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		target writeTarget
+	}{
+		{"default", writeDefault},
+		{"cfl_override", writeCFLOverride},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			server := userResponseServer(t, `{"accountId":"abc","displayName":"X","email":"x@e"}`, http.StatusOK)
+			defer server.Close()
+			build := func(_ *config.Config) (*api.Client, error) {
+				return api.NewClient(server.URL, "x@e", "tok"), nil
+			}
+			tmpDir := t.TempDir()
+			configPath := filepath.Join(tmpDir, "config.yml")
+			cfg := &config.Config{URL: server.URL + "/wiki", Email: "x@e", APIToken: "tok"}
+			result := &reconcileResult{store: &credstore.Store{}, target: tc.target}
+
+			testutil.RequireNoError(t,
+				finalizeInit(context.Background(), newFinalizeOpts(), cfg, result, configPath, false, build))
+
+			loaded, err := credstore.Load(configPath)
+			testutil.RequireNoError(t, err)
+
+			var got, leak credstore.Section
+			switch tc.target {
+			case writeDefault:
+				got, leak = loaded.Default, loaded.CFL.Section
+			case writeCFLOverride:
+				got, leak = loaded.CFL.Section, loaded.Default
+			}
+			testutil.Equal(t, "tok", got.APIToken)
+			testutil.Equal(t, "x@e", got.Email)
+			testutil.Equal(t, server.URL, got.URL) // URL normalized: /wiki stripped
+			// Leak guard: every credential field must be empty in the
+			// non-target section, not just APIToken.
+			testutil.Equal(t, "", leak.APIToken)
+			testutil.Equal(t, "", leak.Email)
+			testutil.Equal(t, "", leak.URL)
+		})
+	}
 }
 
 func TestFinalizeInit_BasicHappyPath(t *testing.T) {
@@ -161,7 +219,7 @@ func TestFinalizeInit_BasicHappyPath(t *testing.T) {
 		return api.NewClient(server.URL, "rian@example.com", "test-token"), nil
 	}
 
-	err := finalizeInit(context.Background(), opts, cfg, configPath, false, build)
+	err := finalizeInit(context.Background(), opts, cfg, newFinalizeReconcileResult(), configPath, false, build)
 	testutil.RequireNoError(t, err)
 
 	stdout := opts.Stdout.(*bytes.Buffer).String()
@@ -207,7 +265,7 @@ func TestFinalizeInit_BearerHappyPath(t *testing.T) {
 		}, nil
 	}
 
-	err := finalizeInit(context.Background(), opts, cfg, configPath, false, build)
+	err := finalizeInit(context.Background(), opts, cfg, newFinalizeReconcileResult(), configPath, false, build)
 	testutil.RequireNoError(t, err)
 
 	stdout := opts.Stdout.(*bytes.Buffer).String()
@@ -283,7 +341,7 @@ func TestFinalizeInit_AuthFailure(t *testing.T) {
 		return api.NewClient(server.URL, "rian@example.com", "wrong-token"), nil
 	}
 
-	err := finalizeInit(context.Background(), opts, cfg, configPath, false, build)
+	err := finalizeInit(context.Background(), opts, cfg, newFinalizeReconcileResult(), configPath, false, build)
 	testutil.RequireError(t, err)
 	testutil.Contains(t, err.Error(), "authentication failed")
 
@@ -313,7 +371,7 @@ func TestFinalizeInit_BuildFailureSurfacesError(t *testing.T) {
 		return nil, errors.New("simulated builder failure")
 	}
 
-	err := finalizeInit(context.Background(), opts, cfg, configPath, false, build)
+	err := finalizeInit(context.Background(), opts, cfg, newFinalizeReconcileResult(), configPath, false, build)
 	testutil.RequireError(t, err)
 	testutil.Contains(t, err.Error(), "simulated builder failure")
 
@@ -352,7 +410,7 @@ func TestFinalizeInit_NoVerify(t *testing.T) {
 		return api.NewClient(server.URL, "rian@example.com", "test-token"), nil
 	}
 
-	err := finalizeInit(context.Background(), opts, cfg, configPath, true, build)
+	err := finalizeInit(context.Background(), opts, cfg, newFinalizeReconcileResult(), configPath, true, build)
 	testutil.RequireNoError(t, err)
 
 	testutil.False(t, builderCalled, "clientBuilder should not be invoked when --no-verify is set")

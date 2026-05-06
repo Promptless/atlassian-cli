@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/open-cli-collective/atlassian-go/credstore"
 	"github.com/open-cli-collective/atlassian-go/testutil"
 	"github.com/open-cli-collective/atlassian-go/url"
 )
@@ -527,4 +528,134 @@ func TestGetURL_FullPrecedenceChain(t *testing.T) {
 	// JIRA_URL takes precedence over ATLASSIAN_URL
 	t.Setenv("JIRA_URL", "https://jira-url.atlassian.net")
 	testutil.Equal(t, GetURL(), "https://jira-url.atlassian.net")
+}
+
+func TestSharedStore_FillsURLBetweenEnvAndLegacy(t *testing.T) {
+	tempDir, cleanup := setupTestConfig(t)
+	defer cleanup()
+
+	// Seed shared store with a URL.
+	sharedPath := filepath.Join(tempDir, "atlassian-cli", "config.yml")
+	store := &credstore.Store{
+		Default: credstore.Section{URL: "https://shared.atlassian.net"},
+	}
+	testutil.RequireNoError(t, store.Save(sharedPath))
+
+	// No legacy file, no env vars → shared default wins.
+	testutil.Equal(t, "https://shared.atlassian.net", GetURL())
+
+	// Env var beats shared.
+	t.Setenv("ATLASSIAN_URL", "https://env.atlassian.net")
+	testutil.Equal(t, "https://env.atlassian.net", GetURL())
+}
+
+func TestSharedStore_JTKOverrideBeatsDefault(t *testing.T) {
+	tempDir, cleanup := setupTestConfig(t)
+	defer cleanup()
+
+	sharedPath := filepath.Join(tempDir, "atlassian-cli", "config.yml")
+	store := &credstore.Store{
+		Default: credstore.Section{
+			URL:      "https://shared.atlassian.net",
+			APIToken: "default-tok",
+		},
+		JTK: credstore.ToolSection{
+			Section: credstore.Section{APIToken: "jtk-tok"},
+		},
+	}
+	testutil.RequireNoError(t, store.Save(sharedPath))
+
+	testutil.Equal(t, "jtk-tok", GetAPIToken())
+}
+
+func TestSharedStore_LegacyWinsWhenSharedAbsent(t *testing.T) {
+	_, cleanup := setupTestConfig(t)
+	defer cleanup()
+
+	cfg := &Config{
+		URL:      "https://legacy.atlassian.net",
+		Email:    "legacy@example.com",
+		APIToken: "legacy-tok",
+	}
+	testutil.RequireNoError(t, Save(cfg))
+	testutil.Equal(t, "https://legacy.atlassian.net", GetURL())
+	testutil.Equal(t, "legacy-tok", GetAPIToken())
+}
+
+func TestSharedStore_DefaultProject(t *testing.T) {
+	tempDir, cleanup := setupTestConfig(t)
+	defer cleanup()
+
+	sharedPath := filepath.Join(tempDir, "atlassian-cli", "config.yml")
+	store := &credstore.Store{
+		JTK: credstore.ToolSection{DefaultProject: "MON"},
+	}
+	testutil.RequireNoError(t, store.Save(sharedPath))
+
+	testutil.Equal(t, "MON", GetDefaultProject())
+	t.Setenv("JIRA_DEFAULT_PROJECT", "ENV")
+	testutil.Equal(t, "ENV", GetDefaultProject())
+}
+
+func TestSharedStore_AuthMethodWithSource(t *testing.T) {
+	tempDir, cleanup := setupTestConfig(t)
+	defer cleanup()
+
+	sharedPath := filepath.Join(tempDir, "atlassian-cli", "config.yml")
+	store := &credstore.Store{
+		Default: credstore.Section{AuthMethod: "bearer"},
+	}
+	testutil.RequireNoError(t, store.Save(sharedPath))
+
+	value, source := GetAuthMethodWithSource()
+	testutil.Equal(t, "bearer", value)
+	testutil.Equal(t, string(credstore.SourceDefault), source)
+}
+
+func TestSharedStore_FullPrecedenceChain(t *testing.T) {
+	tempDir, cleanup := setupTestConfig(t)
+	defer cleanup()
+
+	// Layer 1 (lowest): legacy file.
+	cfg := &Config{URL: "https://legacy.atlassian.net", APIToken: "legacy-tok"}
+	testutil.RequireNoError(t, Save(cfg))
+
+	// Layer 2: shared default.
+	sharedPath := filepath.Join(tempDir, "atlassian-cli", "config.yml")
+	store := &credstore.Store{
+		Default: credstore.Section{URL: "https://shared.atlassian.net", APIToken: "shared-tok"},
+	}
+	testutil.RequireNoError(t, store.Save(sharedPath))
+	testutil.Equal(t, "https://shared.atlassian.net", GetURL()) // shared default wins over legacy
+
+	// Layer 3: jtk override beats default.
+	store.JTK.Section = credstore.Section{APIToken: "jtk-tok"}
+	testutil.RequireNoError(t, store.Save(sharedPath))
+	testutil.Equal(t, "jtk-tok", GetAPIToken())
+
+	// Layer 4: ATLASSIAN_* env beats shared.
+	t.Setenv("ATLASSIAN_API_TOKEN", "atlassian-env-tok")
+	testutil.Equal(t, "atlassian-env-tok", GetAPIToken())
+
+	// Layer 5: JIRA_* env beats ATLASSIAN_*.
+	t.Setenv("JIRA_API_TOKEN", "jira-env-tok")
+	testutil.Equal(t, "jira-env-tok", GetAPIToken())
+}
+
+func TestSharedStore_CorruptDoesNotBlockAccessors(t *testing.T) {
+	tempDir, cleanup := setupTestConfig(t)
+	defer cleanup()
+
+	// Corrupt shared store.
+	sharedPath := filepath.Join(tempDir, "atlassian-cli", "config.yml")
+	testutil.RequireNoError(t, os.MkdirAll(filepath.Dir(sharedPath), 0o700))
+	testutil.RequireNoError(t, os.WriteFile(sharedPath, []byte("default: : :: ["), 0o600))
+
+	// Legacy still works.
+	cfg := &Config{URL: "https://legacy.atlassian.net", Email: "u@e", APIToken: "tok"}
+	testutil.RequireNoError(t, Save(cfg))
+
+	// Accessor returns legacy value despite corrupt shared.
+	testutil.Equal(t, "https://legacy.atlassian.net", GetURL())
+	testutil.Equal(t, "tok", GetAPIToken())
 }
