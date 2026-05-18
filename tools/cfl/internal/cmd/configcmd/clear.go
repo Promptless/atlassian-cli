@@ -32,10 +32,9 @@ func newClearCmd(opts *root.Options) *cobra.Command {
 		Short: "Clear the stored Atlassian API token from the OS keyring",
 		Long: `Remove the stored API token from the OS keyring.
 
-By default this deletes only the key cfl resolves to: cfl_api_token if a
-cfl-specific override exists, otherwise the shared api_token (which jtk
-also uses — you will be warned). The exact ref and key are previewed
-before deletion.
+By default this deletes the single shared api_token (cfl and jtk
+resolve the same key, so jtk also loses access — you will be warned).
+The exact ref and key are previewed before deletion.
 
 Use --all to remove the ENTIRE shared bundle plus the shared non-secret
 config file and scrub any surviving legacy plaintext files.
@@ -66,7 +65,7 @@ func runClear(opts *clearOptions) error {
 	// store the delete/clear step reuses (no second passphrase prompt).
 	// The env + plaintext-file fields are populated even when the keyring
 	// cannot be opened, so `--all` can still clean plaintext artifacts.
-	plan, store, err := keyring.PlanClear(credstore.ToolCFL)
+	plan, store, err := keyring.PlanClear(credstore.ToolCFL, opts.all)
 	if store != nil {
 		defer func() { _ = store.Close() }()
 	}
@@ -141,10 +140,10 @@ func runClear(opts *clearOptions) error {
 	}
 
 	_, _ = fmt.Fprintf(opts.Stderr, "This will delete key %q from keyring %s.\n", plan.ToolKey, plan.Ref)
-	if plan.SharedDefault {
-		_, _ = fmt.Fprintln(opts.Stderr,
-			"Warning: this is the SHARED token (api_token). jtk will also lose access. Use a cfl_api_token override if you want cfl-only credentials.")
-	}
+	// One key per logical credential (§1.11.10): the only deletable key
+	// is the shared api_token, so clearing it always deauths the sibling.
+	_, _ = fmt.Fprintln(opts.Stderr,
+		"Warning: this is the SHARED token (api_token). jtk will also lose access (cfl and jtk resolve the same key).")
 	ok, cerr := confirm("Proceed?")
 	if cerr != nil {
 		return cerr

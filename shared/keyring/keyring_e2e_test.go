@@ -2,10 +2,14 @@ package keyring
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
+
+	cccredstore "github.com/open-cli-collective/cli-common/credstore"
 
 	"github.com/open-cli-collective/atlassian-go/credstore"
 )
@@ -34,11 +38,77 @@ func hermetic(t *testing.T) string {
 //nolint:gosec // G101: test fixture string, not a real credential
 const secret = "TOK-pqrSTU-suffix" // distinctive so a leak is unmistakable
 
+// bundleKeys returns the EXACT set of bundle keys that currently hold a
+// value, across the conforming key (api_token) AND the deprecated B3 keys,
+// sorted. §1.11.11 conformance asserts against this: a healthy bundle is
+// exactly {api_token}; a cleared bundle is exactly empty; no deprecated
+// per-tool key may survive a migration.
+func bundleKeys(t *testing.T) []string {
+	t.Helper()
+	s, err := OpenForClearAll() // migrationAllowedKeys: sees deprecated keys too
+	if err != nil {
+		t.Fatalf("OpenForClearAll: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	var present []string
+	for _, k := range append([]string{KeyAPIToken}, deprecatedKeys...) {
+		ok, herr := s.HasToken(k)
+		if herr != nil {
+			t.Fatalf("HasToken(%s): %v", k, herr)
+		}
+		if ok {
+			present = append(present, k)
+		}
+	}
+	sort.Strings(present)
+	return present
+}
+
+// seedDeprecatedKey writes a removed per-tool key directly into the
+// bundle to stand in for B3 upgrade state. SetToken refuses non-allowlist
+// keys by design, so the fixture goes through the underlying credstore
+// (opened with migrationAllowedKeys) — exactly the residue this
+// migration's deprecated-key cleanup must absorb.
+func seedDeprecatedKey(t *testing.T, key, val string) {
+	t.Helper()
+	s, err := OpenForClearAll()
+	if err != nil {
+		t.Fatalf("OpenForClearAll: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	if err := s.cs.Set(s.profile, key, val, cccredstore.WithOverwrite()); err != nil {
+		t.Fatalf("seed deprecated key %s: %v", key, err)
+	}
+}
+
+// seedRawAPIToken writes api_token WITHOUT running the migration (via
+// the no-migrate clear-all store), to stand up a "token already in the
+// keyring" precondition for conflict tests.
+func seedRawAPIToken(t *testing.T, val string) {
+	t.Helper()
+	s, err := OpenForClearAll()
+	if err != nil {
+		t.Fatalf("OpenForClearAll: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	if err := s.cs.Set(s.profile, KeyAPIToken, val, cccredstore.WithOverwrite()); err != nil {
+		t.Fatalf("seed api_token: %v", err)
+	}
+}
+
+func wantKeys(t *testing.T, got []string, want ...string) {
+	t.Helper()
+	sort.Strings(want)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("bundle key set = %v, want exactly %v", got, want)
+	}
+}
+
 func TestSetCredential_StdinAndEnv(t *testing.T) {
 	hermetic(t)
 
 	// stdin path: trims surrounding whitespace.
-	if err := SetCredential(strings.NewReader("  "+secret+"\n"), KeyAPIToken, ""); err != nil {
+	if err := SetCredential(strings.NewReader("  "+secret+"\n"), ""); err != nil {
 		t.Fatalf("SetCredential(stdin): %v", err)
 	}
 	got, ok, err := func() (string, bool, error) {
@@ -47,33 +117,46 @@ func TestSetCredential_StdinAndEnv(t *testing.T) {
 			return "", false, e
 		}
 		defer func() { _ = s.Close() }()
-		return s.Token(ToolCFL)
+		return s.Token()
 	}()
 	if err != nil || !ok || got != secret {
 		t.Fatalf("stored token mismatch: got=%q ok=%v err=%v", got, ok, err)
 	}
+	// §1.11.11: a single shared key, nothing else.
+	wantKeys(t, bundleKeys(t), KeyAPIToken)
 
-	// --from-env path.
+	// --from-env path overwrites the same single key.
 	t.Setenv("MY_SECRET_VAR", "env-"+secret)
-	if err := SetCredential(nil, KeyJTKAPIToken, "MY_SECRET_VAR"); err != nil {
+	if err := SetCredential(nil, "MY_SECRET_VAR"); err != nil {
 		t.Fatalf("SetCredential(env): %v", err)
+	}
+	wantKeys(t, bundleKeys(t), KeyAPIToken)
+	// Ingress overwrites: the value must actually be replaced, not just
+	// "key still present" (guards a regression to no-overwrite ingress).
+	got2, ok2, err2 := func() (string, bool, error) {
+		s, e := OpenNoMigrate()
+		if e != nil {
+			return "", false, e
+		}
+		defer func() { _ = s.Close() }()
+		return s.Token()
+	}()
+	if err2 != nil || !ok2 || got2 != "env-"+secret {
+		t.Fatalf("--from-env must overwrite the stored value: got=%q ok=%v err=%v", got2, ok2, err2)
 	}
 }
 
 func TestSetCredential_Rejections(t *testing.T) {
 	hermetic(t)
 
-	if err := SetCredential(strings.NewReader("   \n"), KeyAPIToken, ""); err == nil {
+	if err := SetCredential(strings.NewReader("   \n"), ""); err == nil {
 		t.Fatal("expected error for empty token")
 	}
-	if err := SetCredential(strings.NewReader("x"), "bogus_key", ""); err == nil {
-		t.Fatal("expected error for unknown key")
-	}
-	if err := SetCredential(nil, KeyAPIToken, "DEFINITELY_UNSET_VAR"); err == nil {
+	if err := SetCredential(nil, "DEFINITELY_UNSET_VAR"); err == nil {
 		t.Fatal("expected error for unset env var")
 	}
 	// nil reader + no env var must be a normal error, never a panic.
-	if err := SetCredential(nil, KeyAPIToken, ""); err == nil {
+	if err := SetCredential(nil, ""); err == nil {
 		t.Fatal("expected error for nil stdin and no --from-env")
 	}
 }
@@ -99,16 +182,17 @@ func TestMigration_EndToEnd_ScrubAndSignal(t *testing.T) {
 		t.Fatalf("EnsureMigrated: %v", err)
 	}
 
-	// Token is now in the keyring.
+	// Token is now in the single shared keyring key, and nothing else.
 	s, err := OpenNoMigrate()
 	if err != nil {
 		t.Fatalf("OpenNoMigrate: %v", err)
 	}
 	defer func() { _ = s.Close() }()
-	tok, ok, err := s.get(KeyAPIToken)
+	tok, ok, err := s.Token()
 	if err != nil || !ok || tok != secret {
 		t.Fatalf("keyring token: got=%q ok=%v err=%v", tok, ok, err)
 	}
+	wantKeys(t, bundleKeys(t), KeyAPIToken)
 
 	// Plaintext file scrubbed (non-secret fields preserved).
 	raw, err := os.ReadFile(sharedPath) //nolint:gosec // G304: test reads its own temp file
@@ -144,10 +228,11 @@ func TestMigration_EndToEnd_ScrubAndSignal(t *testing.T) {
 	}
 }
 
-// End-to-end: legacy per-tool plaintext files (cfl yaml + jtk json) with
-// NO shared default migrate to their own override keys, are scrubbed in
-// place, and the migration is idempotent regardless of tool order.
-func TestMigration_LegacyFiles_ScrubAndIdempotent(t *testing.T) {
+// Amended §1.8: two legacy per-tool plaintext files (cfl yml + jtk json)
+// holding the SAME token, with no shared default, collapse onto the
+// single shared api_token (no per-tool keys), are scrubbed in place, and
+// the migration is idempotent.
+func TestMigration_DuplicateLegacy_CollapsesToSingleKey(t *testing.T) {
 	hermetic(t)
 
 	cflPath := credstore.LegacyCFLPath()
@@ -158,13 +243,12 @@ func TestMigration_LegacyFiles_ScrubAndIdempotent(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(jtkPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	cflTok, jtkTok := "CFL-"+secret, "JTK-"+secret
 	if err := os.WriteFile(cflPath,
-		[]byte("url: https://acme.atlassian.net\nemail: c@e\napi_token: "+cflTok+"\n"), 0o600); err != nil {
+		[]byte("url: https://acme.atlassian.net\nemail: c@e\napi_token: "+secret+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(jtkPath,
-		[]byte(`{"url":"https://acme.atlassian.net","email":"j@e","api_token":"`+jtkTok+`"}`), 0o600); err != nil {
+		[]byte(`{"url":"https://acme.atlassian.net","email":"j@e","api_token":"`+secret+`"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -177,14 +261,10 @@ func TestMigration_LegacyFiles_ScrubAndIdempotent(t *testing.T) {
 		t.Fatalf("OpenNoMigrate: %v", err)
 	}
 	defer func() { _ = s.Close() }()
-
-	// No shared default → each legacy file maps to its own override key.
-	if v, ok, _ := s.get(KeyCFLAPIToken); !ok || v != cflTok {
-		t.Fatalf("cfl_api_token: got=%q ok=%v", v, ok)
+	if v, ok, _ := s.Token(); !ok || v != secret {
+		t.Fatalf("api_token: got=%q ok=%v", v, ok)
 	}
-	if v, ok, _ := s.get(KeyJTKAPIToken); !ok || v != jtkTok {
-		t.Fatalf("jtk_api_token: got=%q ok=%v", v, ok)
-	}
+	wantKeys(t, bundleKeys(t), KeyAPIToken)
 
 	for _, p := range []string{cflPath, jtkPath} {
 		raw, rerr := os.ReadFile(p) //nolint:gosec // G304: test reads its own temp file
@@ -196,11 +276,185 @@ func TestMigration_LegacyFiles_ScrubAndIdempotent(t *testing.T) {
 		}
 	}
 
-	// Idempotent across re-run (cfl-first / jtk-first order is internal
-	// to gatherEffective; a second pass must be a silent no-op).
 	if err := EnsureMigrated(); err != nil {
 		t.Fatalf("second EnsureMigrated must be idempotent: %v", err)
 	}
+}
+
+// Amended §1.8: divergent plaintext sources (shared default vs a legacy
+// per-tool file) is a HARD conflict — the migration never precedence-picks
+// a secret winner. Two-phase guarantee: nothing is written and NO source
+// is scrubbed; the error names every location and never the value.
+func TestMigration_DivergentSources_ConflictNoMutation(t *testing.T) {
+	dir := hermetic(t)
+	sharedPath := filepath.Join(dir, "atlassian-cli", "config.yml")
+	if err := os.MkdirAll(filepath.Dir(sharedPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	defTok := "DEFAULT-" + secret
+	legTok := "LEGACY-" + secret
+	if err := os.WriteFile(sharedPath,
+		[]byte("default:\n  url: https://acme.atlassian.net\n  api_token: "+defTok+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cflPath := credstore.LegacyCFLPath()
+	if err := os.MkdirAll(filepath.Dir(cflPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cflPath,
+		[]byte("url: https://acme.atlassian.net\napi_token: "+legTok+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := EnsureMigrated()
+	if !errors.Is(err, ErrMigrationConflict) {
+		t.Fatalf("want ErrMigrationConflict, got %v", err)
+	}
+	msg := err.Error()
+	if strings.Contains(msg, defTok) || strings.Contains(msg, legTok) {
+		t.Fatalf("conflict error leaked a secret value: %s", msg)
+	}
+	if !strings.Contains(msg, sharedPath) || !strings.Contains(msg, cflPath) {
+		t.Fatalf("conflict error must name every source location: %s", msg)
+	}
+
+	// Two-phase: no source mutated, nothing written to the keyring.
+	for _, p := range []string{sharedPath, cflPath} {
+		raw, rerr := os.ReadFile(p) //nolint:gosec // G304: test reads its own temp file
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+		if !strings.Contains(string(raw), "api_token") {
+			t.Fatalf("conflict must NOT scrub %s:\n%s", p, raw)
+		}
+	}
+	wantKeys(t, bundleKeys(t)) // empty: nothing written
+}
+
+// B3 upgrade fixture: a user upgraded through the per-tool-key build and
+// holds ONLY deprecated keyring keys (plaintext already scrubbed), both
+// with the same value. The migration must consolidate onto api_token,
+// delete BOTH deprecated keys, fire the signal, and leave the bundle
+// exactly {api_token}. Without this, S1's key-set collapse would silently
+// de-authenticate these users.
+func TestMigration_B3UpgradeFixture_DeprecatedKeysOnly(t *testing.T) {
+	hermetic(t)
+	seedDeprecatedKey(t, "cfl_api_token", secret)
+	seedDeprecatedKey(t, "jtk_api_token", secret)
+	wantKeys(t, bundleKeys(t), "cfl_api_token", "jtk_api_token") // precondition
+
+	if err := EnsureMigrated(); err != nil {
+		t.Fatalf("EnsureMigrated: %v", err)
+	}
+
+	s, err := OpenNoMigrate()
+	if err != nil {
+		t.Fatalf("OpenNoMigrate: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	if v, ok, _ := s.Token(); !ok || v != secret {
+		t.Fatalf("api_token: got=%q ok=%v", v, ok)
+	}
+	wantKeys(t, bundleKeys(t), KeyAPIToken) // deprecated keys gone
+
+	var buf bytes.Buffer
+	FlushMigrationNotice(&buf)
+	if buf.Len() == 0 {
+		t.Fatal("expected a migration notice for the B3 upgrade path")
+	}
+	if strings.Contains(buf.String(), secret) {
+		t.Fatalf("migration notice leaked the secret: %s", buf.String())
+	}
+
+	if err := EnsureMigrated(); err != nil {
+		t.Fatalf("second EnsureMigrated must be idempotent: %v", err)
+	}
+}
+
+// B3 upgrade fixture, divergent: the two deprecated keys disagree. Same
+// hard-conflict rule — never precedence-pick — and the two-phase
+// guarantee means NEITHER deprecated key is deleted and api_token is not
+// written.
+func TestMigration_B3UpgradeFixture_DivergentDeprecatedKeys_Conflict(t *testing.T) {
+	hermetic(t)
+	seedDeprecatedKey(t, "cfl_api_token", "CFL-"+secret)
+	seedDeprecatedKey(t, "jtk_api_token", "JTK-"+secret)
+
+	err := EnsureMigrated()
+	if !errors.Is(err, ErrMigrationConflict) {
+		t.Fatalf("want ErrMigrationConflict, got %v", err)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("conflict error leaked a secret value: %s", err)
+	}
+	// Two-phase: nothing deleted, nothing written.
+	wantKeys(t, bundleKeys(t), "cfl_api_token", "jtk_api_token")
+	s, oerr := OpenNoMigrate()
+	if oerr != nil {
+		t.Fatalf("OpenNoMigrate: %v", oerr)
+	}
+	defer func() { _ = s.Close() }()
+	if _, ok, _ := s.Token(); ok {
+		t.Fatal("conflict must not write api_token")
+	}
+
+	// Stably reproducible: a second run must fail the same way (the
+	// no-mutation + stable-error pair, independent of map iteration
+	// order). State must still be untouched.
+	if err2 := EnsureMigrated(); !errors.Is(err2, ErrMigrationConflict) {
+		t.Fatalf("conflict must be stable on re-run, got: %v", err2)
+	}
+	wantKeys(t, bundleKeys(t), "cfl_api_token", "jtk_api_token")
+}
+
+// §1.11.11: after a default `config clear` the (single-key) bundle is
+// exactly empty, and `config clear --all` on an already-clean bundle is a
+// no-op that also leaves it empty.
+func TestClear_BundleEmptyAfterClear(t *testing.T) {
+	hermetic(t)
+	if err := SetCredential(strings.NewReader(secret), ""); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	wantKeys(t, bundleKeys(t), KeyAPIToken)
+
+	plan, store, err := PlanClear(ToolCFL, false)
+	if err != nil {
+		t.Fatalf("PlanClear: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	if plan.ToolKey != KeyAPIToken {
+		t.Fatalf("default clear should target api_token; got %q", plan.ToolKey)
+	}
+	if err := store.DeleteToken(plan.ToolKey); err != nil {
+		t.Fatalf("DeleteToken: %v", err)
+	}
+	wantKeys(t, bundleKeys(t)) // empty
+}
+
+// §1.8 recovery path: a user left with only deprecated per-tool keyring
+// keys whose values diverge cannot migrate (hard conflict). The
+// documented escape hatch is `config clear --all` — it must wipe the
+// WHOLE bundle, deprecated keys included, leaving it exactly empty so a
+// clean set-credential can follow.
+func TestClearAll_RemovesDeprecatedKeys(t *testing.T) {
+	hermetic(t)
+	seedDeprecatedKey(t, "cfl_api_token", "CFL-"+secret)
+	seedDeprecatedKey(t, "jtk_api_token", "JTK-"+secret)
+	wantKeys(t, bundleKeys(t), "cfl_api_token", "jtk_api_token") // precondition
+
+	_, store, perr := PlanClear(ToolCFL, true)
+	if perr != nil {
+		t.Fatalf("PlanClear: %v", perr)
+	}
+	defer func() { _ = store.Close() }()
+	cleared, err := ClearAll(store)
+	if err != nil {
+		t.Fatalf("ClearAll: %v", err)
+	}
+	if !cleared {
+		t.Fatal("ClearAll must report the bundle cleared")
+	}
+	wantKeys(t, bundleKeys(t)) // exactly empty — deprecated keys gone
 }
 
 // ClearAll must FAIL LOUD (naming the path) when a surviving legacy file
@@ -209,7 +463,7 @@ func TestMigration_LegacyFiles_ScrubAndIdempotent(t *testing.T) {
 // token must survive the failure (the safer, recoverable state).
 func TestClearAll_FailsLoudOnUnparseableLegacy(t *testing.T) {
 	hermetic(t)
-	if err := SetCredential(strings.NewReader(secret), KeyAPIToken, ""); err != nil {
+	if err := SetCredential(strings.NewReader(secret), ""); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	cflPath := credstore.LegacyCFLPath()
@@ -221,7 +475,7 @@ func TestClearAll_FailsLoudOnUnparseableLegacy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plan, store, perr := PlanClear(ToolCFL)
+	_, store, perr := PlanClear(ToolCFL, true)
 	if perr != nil {
 		t.Fatalf("PlanClear: %v", perr)
 	}
@@ -229,7 +483,6 @@ func TestClearAll_FailsLoudOnUnparseableLegacy(t *testing.T) {
 		t.Fatal("PlanClear must return an open store on success")
 	}
 	defer func() { _ = store.Close() }()
-	_ = plan
 
 	cleared, err := ClearAll(store)
 	if err == nil {
@@ -258,61 +511,11 @@ func TestClearAll_FailsLoudOnUnparseableLegacy(t *testing.T) {
 	}
 }
 
-// A legacy token shadowed by a non-empty shared default is scrub-only:
-// no override key written, and (since nothing was relocated to a NEW
-// key beyond the default) the file is still scrubbed.
-func TestMigration_ShadowedLegacy_ScrubOnly(t *testing.T) {
-	dir := hermetic(t)
-	sharedPath := filepath.Join(dir, "atlassian-cli", "config.yml")
-	if err := os.MkdirAll(filepath.Dir(sharedPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(sharedPath,
-		[]byte("default:\n  url: https://acme.atlassian.net\n  api_token: DEFAULT-"+secret+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cflPath := credstore.LegacyCFLPath()
-	if err := os.MkdirAll(filepath.Dir(cflPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(cflPath,
-		[]byte("url: https://acme.atlassian.net\napi_token: SHADOWED-"+secret+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := EnsureMigrated(); err != nil {
-		t.Fatalf("EnsureMigrated: %v", err)
-	}
-	s, err := OpenNoMigrate()
-	if err != nil {
-		t.Fatalf("OpenNoMigrate: %v", err)
-	}
-	defer func() { _ = s.Close() }()
-
-	if _, ok, _ := s.get(KeyCFLAPIToken); ok {
-		t.Fatal("shadowed legacy value must NOT be written to cfl_api_token")
-	}
-	if v, ok, _ := s.get(KeyAPIToken); !ok || v != "DEFAULT-"+secret {
-		t.Fatalf("api_token: got=%q ok=%v", v, ok)
-	}
-	// Both plaintext sources scrubbed even though the legacy file's value
-	// was dead data.
-	for _, p := range []string{sharedPath, cflPath} {
-		raw, rerr := os.ReadFile(p) //nolint:gosec // G304: test reads its own temp file
-		if rerr != nil {
-			t.Fatal(rerr)
-		}
-		if strings.Contains(string(raw), secret) {
-			t.Fatalf("%s not scrubbed:\n%s", p, raw)
-		}
-	}
-}
-
 // InspectForTool must report presence/source/backend without ever
 // returning the token value.
 func TestInspectForTool_NoValue(t *testing.T) {
 	hermetic(t)
-	if err := SetCredential(strings.NewReader(secret), KeyAPIToken, ""); err != nil {
+	if err := SetCredential(strings.NewReader(secret), ""); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	info, err := InspectForTool(ToolCFL)
@@ -340,7 +543,7 @@ func TestInspectForTool_NoValue(t *testing.T) {
 // one-shot guard), with no secret in the warning text.
 func TestResolveToken_CorruptSharedConfig_DegradesGracefully(t *testing.T) {
 	dir := hermetic(t)
-	if err := SetCredential(strings.NewReader(secret), KeyAPIToken, ""); err != nil {
+	if err := SetCredential(strings.NewReader(secret), ""); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	sharedPath := filepath.Join(dir, "atlassian-cli", "config.yml")
@@ -389,89 +592,214 @@ func TestResolveToken_CorruptSharedConfig_DegradesGracefully(t *testing.T) {
 	}
 }
 
-// A pre-existing per-tool override key outranks api_token in
-// resolveFromStore. When init writes the shared default it must drop that
-// override, otherwise the tool keeps resolving the stale override token
-// the user just replaced. PersistTokenForTool owns that invariant.
-func TestPersistTokenForTool_DefaultWriteClearsStaleOverride(t *testing.T) {
-	hermetic(t)
+// writeLegacyDefault writes a pre-migration shared config.yml with one
+// plaintext default api_token (credstore.Save strips tokens, so the
+// fixture is hand-written).
+func writeLegacyDefault(t *testing.T, dir, token string) string {
+	t.Helper()
+	p := filepath.Join(dir, "atlassian-cli", "config.yml")
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p,
+		[]byte("default:\n  url: https://acme.atlassian.net\n  api_token: "+token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
 
-	const stale = "OLD-cfl-override-token"
-	if err := PersistTokenForTool(credstore.ToolCFL, true, stale); err != nil {
-		t.Fatalf("seed cfl override: %v", err)
-	}
-	if tok, _, err := ResolveTokenNoMigrate(credstore.ToolCFL); err != nil || tok != stale {
-		t.Fatalf("precondition: cfl should resolve the override; got %q err=%v", tok, err)
-	}
+// Concurrent-writer race, IDENTICAL value: a writer sets api_token to the
+// same value between phase-1 read and phase-2 write. The no-overwrite
+// write hits ErrExists; re-resolve sees an equal value → benign,
+// migration completes (plaintext scrubbed), nothing clobbered.
+func TestMigration_ConcurrentWriter_IdenticalValue_Benign(t *testing.T) {
+	dir := hermetic(t)
+	shared := writeLegacyDefault(t, dir, secret)
 
-	// init reuses the shared default → write api_token. The stale
-	// cfl_api_token must be removed so cfl resolves the new value.
-	if err := PersistTokenForTool(credstore.ToolCFL, false, secret); err != nil {
-		t.Fatalf("PersistTokenForTool(default): %v", err)
+	migrationApplyHook = func(s *Store) {
+		if err := s.cs.Set(s.profile, KeyAPIToken, secret, cccredstore.WithOverwrite()); err != nil {
+			t.Fatalf("race-seed api_token: %v", err)
+		}
 	}
-	if tok, src, err := ResolveTokenNoMigrate(credstore.ToolCFL); err != nil || tok != secret || src != SourceKeyAPI {
-		t.Fatalf("cfl must resolve the saved api_token, not the stale override; got %q src=%q err=%v", tok, src, err)
-	}
+	t.Cleanup(func() { migrationApplyHook = nil })
 
+	if err := EnsureMigrated(); err != nil {
+		t.Fatalf("identical concurrent value must be benign, got: %v", err)
+	}
 	s, err := OpenNoMigrate()
 	if err != nil {
-		t.Fatalf("open: %v", err)
+		t.Fatalf("OpenNoMigrate: %v", err)
 	}
 	defer func() { _ = s.Close() }()
-	if ok, herr := s.HasToken(KeyFor(credstore.ToolCFL)); herr != nil || ok {
-		t.Fatalf("cfl override key must be gone after a default write; present=%v err=%v", ok, herr)
+	if v, ok, _ := s.Token(); !ok || v != secret {
+		t.Fatalf("api_token: got=%q ok=%v", v, ok)
 	}
-
-	// Sibling override is independent and must survive a cfl default write.
-	if err := PersistTokenForTool(credstore.ToolJTK, true, "jtk-only"); err != nil {
-		t.Fatalf("seed jtk override: %v", err)
+	wantKeys(t, bundleKeys(t), KeyAPIToken)
+	raw, _ := os.ReadFile(shared) //nolint:gosec // G304: test reads its own temp file
+	if strings.Contains(string(raw), "api_token") {
+		t.Fatalf("plaintext should still be scrubbed on the benign path:\n%s", raw)
 	}
-	if err := PersistTokenForTool(credstore.ToolCFL, false, secret); err != nil {
-		t.Fatalf("re-write cfl default: %v", err)
+	// The consolidation is effective this run → the one-time notice
+	// fires (and never leaks the secret), even on the benign race path.
+	var nb bytes.Buffer
+	FlushMigrationNotice(&nb)
+	if nb.Len() == 0 {
+		t.Fatal("benign concurrent migration must still emit the notice")
 	}
-	if tok, _, err := ResolveTokenNoMigrate(credstore.ToolJTK); err != nil || tok != "jtk-only" {
-		t.Fatalf("jtk override must be untouched by a cfl default write; got %q err=%v", tok, err)
+	if strings.Contains(nb.String(), secret) {
+		t.Fatalf("notice leaked the secret: %s", nb.String())
 	}
 }
 
-// The mismatch "use X for both tools" choice must actually unify: after
-// PersistUnifiedToken both tools resolve the one api_token and neither
-// per-tool override remains to shadow it. This is the explicit cross-tool
-// action where, unlike a normal default write, the sibling override is
-// also cleared.
-func TestPersistUnifiedToken_BothToolsResolveSharedAndOverridesGone(t *testing.T) {
-	hermetic(t)
+// Concurrent-writer race, DIVERGENT value: a writer sets api_token to a
+// DIFFERENT value mid-migration. The no-overwrite write hits ErrExists;
+// re-resolve sees a different value → hard conflict naming the keyring
+// value, the racer's token is NOT clobbered, and no plaintext is scrubbed.
+func TestMigration_ConcurrentWriter_DivergentValue_ConflictNoClobber(t *testing.T) {
+	dir := hermetic(t)
+	srcTok := "SRC-" + secret
+	raceTok := "RACE-" + secret
+	shared := writeLegacyDefault(t, dir, srcTok)
 
-	// Post-migration steady state of two divergent legacy files: each
-	// tool's old token sits under its own per-tool key.
-	if err := PersistTokenForTool(credstore.ToolCFL, true, "cfl-old"); err != nil {
-		t.Fatalf("seed cfl override: %v", err)
-	}
-	if err := PersistTokenForTool(credstore.ToolJTK, true, "jtk-old"); err != nil {
-		t.Fatalf("seed jtk override: %v", err)
-	}
-
-	// User chose "use jtk for both": jtk's token is persisted as the
-	// shared default and both overrides are wiped.
-	if err := PersistUnifiedToken("jtk-old"); err != nil {
-		t.Fatalf("PersistUnifiedToken: %v", err)
-	}
-
-	for _, tool := range []string{credstore.ToolCFL, credstore.ToolJTK} {
-		tok, src, err := ResolveTokenNoMigrate(tool)
-		if err != nil || tok != "jtk-old" || src != SourceKeyAPI {
-			t.Fatalf("%s must resolve the unified api_token; got %q src=%q err=%v", tool, tok, src, err)
+	migrationApplyHook = func(s *Store) {
+		if err := s.cs.Set(s.profile, KeyAPIToken, raceTok, cccredstore.WithOverwrite()); err != nil {
+			t.Fatalf("race-seed api_token: %v", err)
 		}
 	}
+	t.Cleanup(func() { migrationApplyHook = nil })
 
-	s, err := OpenNoMigrate()
-	if err != nil {
-		t.Fatalf("open: %v", err)
+	err := EnsureMigrated()
+	if !errors.Is(err, ErrMigrationConflict) {
+		t.Fatalf("divergent concurrent value must conflict, got: %v", err)
+	}
+	msg := err.Error()
+	if strings.Contains(msg, srcTok) || strings.Contains(msg, raceTok) {
+		t.Fatalf("conflict error leaked a secret value: %s", msg)
+	}
+	if !strings.Contains(msg, shared) || !strings.Contains(msg, KeyAPIToken) {
+		t.Fatalf("conflict must name the source path AND the keyring api_token: %s", msg)
+	}
+	// The racer's token survives (never silently clobbered).
+	s, oerr := OpenNoMigrate()
+	if oerr != nil {
+		t.Fatalf("OpenNoMigrate: %v", oerr)
 	}
 	defer func() { _ = s.Close() }()
-	for _, k := range []string{KeyFor(credstore.ToolCFL), KeyFor(credstore.ToolJTK)} {
-		if ok, herr := s.HasToken(k); herr != nil || ok {
-			t.Fatalf("override key %s must be gone after unify; present=%v err=%v", k, ok, herr)
-		}
+	if v, ok, _ := s.Token(); !ok || v != raceTok {
+		t.Fatalf("racer api_token must be intact; got=%q ok=%v", v, ok)
+	}
+	raw, _ := os.ReadFile(shared) //nolint:gosec // G304: test reads its own temp file
+	if !strings.Contains(string(raw), "api_token") {
+		t.Fatalf("conflict must NOT scrub the source:\n%s", raw)
+	}
+}
+
+// A pre-existing keyring api_token that disagrees with a single legacy
+// source: the conflict message must name the keyring api_token as a
+// disagreeing party (not read as "divergence across" one source), no
+// mutation occurs, and no secret leaks.
+func TestMigration_ExistingAPIToken_NamedInConflict(t *testing.T) {
+	dir := hermetic(t)
+	existing := "EXISTING-" + secret
+	legacy := "LEGACY-" + secret
+	seedRawAPIToken(t, existing)
+	shared := writeLegacyDefault(t, dir, legacy)
+
+	err := EnsureMigrated()
+	if !errors.Is(err, ErrMigrationConflict) {
+		t.Fatalf("want ErrMigrationConflict, got %v", err)
+	}
+	msg := err.Error()
+	if strings.Contains(msg, existing) || strings.Contains(msg, legacy) {
+		t.Fatalf("conflict error leaked a secret value: %s", msg)
+	}
+	if !strings.Contains(msg, shared) || !strings.Contains(msg, KeyAPIToken) || !strings.Contains(msg, Ref) {
+		t.Fatalf("conflict must name the legacy path, api_token, and ref: %s", msg)
+	}
+	// No mutation: existing keyring value intact, plaintext not scrubbed.
+	s, oerr := OpenNoMigrate()
+	if oerr != nil {
+		t.Fatalf("OpenNoMigrate: %v", oerr)
+	}
+	defer func() { _ = s.Close() }()
+	if v, _, _ := s.Token(); v != existing {
+		t.Fatalf("existing api_token must be untouched; got %q", v)
+	}
+	raw, _ := os.ReadFile(shared) //nolint:gosec // G304: test reads its own temp file
+	if !strings.Contains(string(raw), "api_token") {
+		t.Fatalf("conflict must NOT scrub the source:\n%s", raw)
+	}
+}
+
+// Realistic B3 upgrade: a deprecated keyring key AND a plaintext file
+// both hold the SAME token → collapse to api_token, delete the
+// deprecated key, scrub the plaintext, all in one run; bundle exactly
+// {api_token}.
+func TestMigration_DeprecatedKeyAndPlaintext_SameValue_Collapses(t *testing.T) {
+	dir := hermetic(t)
+	seedDeprecatedKey(t, "jtk_api_token", secret)
+	shared := writeLegacyDefault(t, dir, secret)
+
+	if err := EnsureMigrated(); err != nil {
+		t.Fatalf("EnsureMigrated: %v", err)
+	}
+	s, err := OpenNoMigrate()
+	if err != nil {
+		t.Fatalf("OpenNoMigrate: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	if v, ok, _ := s.Token(); !ok || v != secret {
+		t.Fatalf("api_token: got=%q ok=%v", v, ok)
+	}
+	wantKeys(t, bundleKeys(t), KeyAPIToken)
+	raw, _ := os.ReadFile(shared) //nolint:gosec // G304: test reads its own temp file
+	if strings.Contains(string(raw), "api_token") {
+		t.Fatalf("plaintext not scrubbed:\n%s", raw)
+	}
+}
+
+// B3 upgrade where the deprecated keyring key and the plaintext file
+// DISAGREE → hard conflict, nothing mutated.
+func TestMigration_DeprecatedKeyAndPlaintext_Divergent_Conflict(t *testing.T) {
+	dir := hermetic(t)
+	seedDeprecatedKey(t, "jtk_api_token", "DEP-"+secret)
+	shared := writeLegacyDefault(t, dir, "PLAIN-"+secret)
+
+	err := EnsureMigrated()
+	if !errors.Is(err, ErrMigrationConflict) {
+		t.Fatalf("want ErrMigrationConflict, got %v", err)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("conflict error leaked a secret value: %s", err)
+	}
+	wantKeys(t, bundleKeys(t), "jtk_api_token") // deprecated key untouched
+	raw, _ := os.ReadFile(shared)               //nolint:gosec // G304: test reads its own temp file
+	if !strings.Contains(string(raw), "api_token") {
+		t.Fatalf("conflict must NOT scrub the source:\n%s", raw)
+	}
+}
+
+// The overwrite=true apply path (no production caller today, but
+// reachable code): an explicit-overwrite migration replaces an existing
+// api_token with the single legacy source value and scrubs plaintext.
+func TestMigrateOverwrite_ApplyReplacesExisting(t *testing.T) {
+	dir := hermetic(t)
+	seedRawAPIToken(t, "OLD-"+secret)
+	shared := writeLegacyDefault(t, dir, "NEW-"+secret)
+
+	s, err := OpenForClearAll() // migrationAllowedKeys, no auto-migrate
+	if err != nil {
+		t.Fatalf("OpenForClearAll: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	if err := migrateLegacyOverwrite(s, true); err != nil {
+		t.Fatalf("overwrite migration: %v", err)
+	}
+	if v, ok, _ := s.Token(); !ok || v != "NEW-"+secret {
+		t.Fatalf("overwrite must replace the existing token; got=%q ok=%v", v, ok)
+	}
+	raw, _ := os.ReadFile(shared) //nolint:gosec // G304: test reads its own temp file
+	if strings.Contains(string(raw), "api_token") {
+		t.Fatalf("overwrite path must still scrub plaintext:\n%s", raw)
 	}
 }

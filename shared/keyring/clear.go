@@ -19,14 +19,11 @@ import (
 type ClearPlan struct {
 	Ref string
 
-	// ToolKey is the single key a default (non --all) clear deletes for
-	// this tool: its override (<tool>_api_token) if that key exists,
-	// otherwise the shared api_token if THAT exists, otherwise "".
+	// ToolKey is the single key a default (non --all) clear deletes: the
+	// shared api_token if it exists, otherwise "". There is one key per
+	// logical credential (§1.11.10) — deleting it de-authenticates BOTH
+	// jtk and cfl.
 	ToolKey string
-
-	// SharedDefault is true when ToolKey == api_token — deleting it also
-	// de-authenticates the sibling tool.
-	SharedDefault bool
 
 	// ExistingKeys are all bundle keys currently holding a value (the
 	// --all blast radius). Empty when the keyring could not be opened.
@@ -63,7 +60,11 @@ type ClearPlan struct {
 // store is closed internally and nil is returned, so the rule is simply
 // "Close it iff it is non-nil" — never both close-internally and
 // transfer.
-func PlanClear(tool string) (ClearPlan, *Store, error) {
+// all selects the superset allowlist (incl. residual deprecated per-tool
+// keys) so `config clear --all` can delete B3 leftovers — the supported
+// recovery path after a divergent-deprecated migration conflict. A
+// default (non-all) clear uses the strict single-key allowlist.
+func PlanClear(tool string, all bool) (ClearPlan, *Store, error) {
 	p := ClearPlan{Ref: Ref}
 
 	for _, name := range envVarsFor(tool) {
@@ -80,7 +81,11 @@ func PlanClear(tool string) (ClearPlan, *Store, error) {
 		}
 	}
 
-	s, err := OpenNoMigrate()
+	open := OpenNoMigrate
+	if all {
+		open = OpenForClearAll
+	}
+	s, err := open()
 	if err != nil {
 		return p, nil, err
 	}
@@ -92,19 +97,11 @@ func PlanClear(tool string) (ClearPlan, *Store, error) {
 	}
 	p.ExistingKeys = existing
 
-	has := func(k string) bool {
-		for _, e := range existing {
-			if e == k {
-				return true
-			}
+	for _, e := range existing {
+		if e == KeyAPIToken {
+			p.ToolKey = KeyAPIToken
+			break
 		}
-		return false
-	}
-	if ok := KeyFor(tool); ok != "" && has(ok) {
-		p.ToolKey = ok
-	} else if has(KeyAPIToken) {
-		p.ToolKey = KeyAPIToken
-		p.SharedDefault = true
 	}
 
 	return p, s, nil
