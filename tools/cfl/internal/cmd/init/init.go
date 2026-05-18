@@ -11,6 +11,7 @@ import (
 
 	"github.com/open-cli-collective/atlassian-go/auth"
 	"github.com/open-cli-collective/atlassian-go/credstore"
+	"github.com/open-cli-collective/atlassian-go/keyring"
 
 	"github.com/open-cli-collective/confluence-cli/api"
 	"github.com/open-cli-collective/confluence-cli/internal/cmd/me"
@@ -93,6 +94,14 @@ func runInit(ctx context.Context, opts *root.Options, prefillURL, prefillEmail, 
 		}
 	}
 
+	// Run the one-time §1.8 migration up front so a pre-existing legacy
+	// plaintext token is relocated (and scrubbed) into the keyring before
+	// the user sets a new one — otherwise it could collide later.
+	if err := keyring.EnsureMigrated(); err != nil {
+		v.Error("Could not prepare secure credential storage: %v", err)
+		return err
+	}
+
 	legacyPath := config.DefaultConfigPath()
 	sharedPath := credstore.DefaultPath()
 	jtkLegacyPath := credstore.LegacyJTKPath()
@@ -103,6 +112,27 @@ func runInit(ctx context.Context, opts *root.Options, prefillURL, prefillEmail, 
 		return err
 	}
 	cfg := result.prefill
+
+	// The up-front EnsureMigrated relocates any legacy plaintext token into
+	// the keyring and scrubs the file, so detectAndReconcile (which reads
+	// the now-scrubbed legacy/config files) leaves prefill.APIToken empty
+	// even though the token still exists. Backfill it from the keyring so a
+	// returning user isn't forced to re-enter a token that was just
+	// migrated. For an explicit "use X for both tools" mismatch choice,
+	// resolve the CHOSEN tool's token (migration moved each differing
+	// legacy token to its own per-tool key), not the current tool's, so
+	// the unify uses the token the user picked. NoMigrate: migration
+	// already ran above. Value stays password-masked in the form (same
+	// ingress as before); never displayed.
+	if cfg.APIToken == "" {
+		backfillTool := credstore.ToolCFL
+		if result.unifyBoth && result.unifySource != "" {
+			backfillTool = result.unifySource
+		}
+		if tok, _, terr := keyring.ResolveTokenNoMigrate(backfillTool); terr == nil {
+			cfg.APIToken = tok
+		}
+	}
 
 	// Determine auth method for form building
 	isBearer := cfg.AuthMethod == auth.AuthMethodBearer
@@ -273,7 +303,26 @@ func finalizeInit(
 	if err := result.store.Save(sharedPath); err != nil {
 		return fmt.Errorf("saving shared store: %w", err)
 	}
-	v.Success("Configuration saved to %s", sharedPath)
+
+	// The token never lands in the plaintext store (Save strips it) — it
+	// goes to the OS keyring under the key matching the write target
+	// (shared default → api_token; cfl override → cfl_api_token), clearing
+	// any stale per-tool override that would otherwise shadow a default
+	// write so the tool resolves exactly what was just saved. An explicit
+	// "use X for both tools" mismatch choice unifies: api_token + clear
+	// BOTH overrides so the sibling switches too.
+	persist := func() error {
+		if result.unifyBoth {
+			return keyring.PersistUnifiedToken(cfg.APIToken)
+		}
+		return keyring.PersistTokenForTool(credstore.ToolCFL, result.target == writeCFLOverride, cfg.APIToken)
+	}
+	if err := persist(); err != nil {
+		v.Error("Saved the non-secret config to %s, but could not store the API token in the keyring: %v", sharedPath, err)
+		v.Error("Recover by storing just the token (no need to re-run init): `cfl set-credential` (reads stdin or --from-env VAR).")
+		return err
+	}
+	v.Success("Configuration saved to %s (token stored in the OS keyring)", sharedPath)
 
 	// Optional: clean up legacy files we just migrated.
 	for _, lp := range result.consumedLegacies {

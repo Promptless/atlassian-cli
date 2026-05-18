@@ -14,6 +14,7 @@ import (
 	"syscall"
 
 	"github.com/open-cli-collective/atlassian-go/exitcode"
+	"github.com/open-cli-collective/atlassian-go/keyring"
 
 	"github.com/open-cli-collective/jira-ticket-cli/internal/cmd/attachments"
 	"github.com/open-cli-collective/jira-ticket-cli/internal/cmd/automation"
@@ -30,6 +31,7 @@ import (
 	"github.com/open-cli-collective/jira-ticket-cli/internal/cmd/projects"
 	"github.com/open-cli-collective/jira-ticket-cli/internal/cmd/refresh"
 	"github.com/open-cli-collective/jira-ticket-cli/internal/cmd/root"
+	"github.com/open-cli-collective/jira-ticket-cli/internal/cmd/setcredential"
 	"github.com/open-cli-collective/jira-ticket-cli/internal/cmd/sprints"
 	"github.com/open-cli-collective/jira-ticket-cli/internal/cmd/transitions"
 	"github.com/open-cli-collective/jira-ticket-cli/internal/cmd/users"
@@ -39,7 +41,12 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx); err != nil {
+	err := run(ctx)
+	// Emit the one-time §1.8 migration notice (if migration ran this
+	// invocation) before exiting — flushed here, not in a defer, so it
+	// still prints when a command error triggers os.Exit.
+	keyring.FlushMigrationNotice(os.Stderr)
+	if err != nil {
 		if !errors.Is(err, root.ErrAlreadyReported) {
 			fmt.Fprintln(os.Stderr, err)
 		}
@@ -67,6 +74,7 @@ func run(ctx context.Context) error {
 	users.Register(rootCmd, opts)
 	me.Register(rootCmd, opts)
 	refresh.Register(rootCmd, opts)
+	setcredential.Register(rootCmd, opts)
 	completion.Register(rootCmd, opts)
 
 	return rootCmd.ExecuteContext(ctx)

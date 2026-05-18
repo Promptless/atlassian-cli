@@ -7,10 +7,21 @@ import (
 	"github.com/charmbracelet/huh"
 
 	"github.com/open-cli-collective/atlassian-go/credstore"
+	"github.com/open-cli-collective/atlassian-go/keyring"
 	"github.com/open-cli-collective/atlassian-go/view"
 
 	"github.com/open-cli-collective/jira-ticket-cli/internal/config"
 )
+
+// hasUsableCreds composes the non-secret config completeness check
+// (credstore) with keyring token presence. The token no longer lives in
+// the shared store, so neither half alone means "already configured".
+func hasUsableCreds(store *credstore.Store, tool string) (bool, error) {
+	if !store.HasUsableConfig(tool) {
+		return false, nil
+	}
+	return keyring.HasTokenForTool(tool)
+}
 
 // writeTarget tells the post-form save logic which section of the
 // shared store to write credential edits into.
@@ -31,6 +42,14 @@ type reconcileResult struct {
 	// is currently reading from. Set when reuse=yes was chosen on a
 	// shared store that already had usable creds.
 	affectsSibling bool
+	// unifyBoth is set by the explicit mismatch choice "use <tool>'s
+	// credentials for both tools". It tells the save path to persist the
+	// chosen token as the shared api_token AND clear BOTH per-tool
+	// override keys, so neither tool stays shadowed on its old token.
+	// unifySource is the tool whose token was chosen (credstore.ToolCFL /
+	// ToolJTK); the command layer resolves THAT tool's keyring token.
+	unifyBoth   bool
+	unifySource string
 }
 
 // detectAndReconcile is jtk's mirror of cfl init's reconciliation
@@ -64,8 +83,12 @@ func detectAndReconcile(
 		cflLegacy = nil
 	}
 
-	// Case 1: shared store has usable jtk creds.
-	if store.HasUsableCreds(credstore.ToolJTK) {
+	// Case 1: shared store + keyring already hold usable jtk creds.
+	usable, err := hasUsableCreds(store, credstore.ToolJTK)
+	if err != nil {
+		return nil, err
+	}
+	if usable {
 		hasOverride := !sectionEmpty(store.JTK.Section)
 		if hasOverride {
 			return resultFromSharedWithOverride(store, prefillURL, prefillEmail, prefillToken, prefillAuthMethod, prefillCloudID), nil
@@ -232,14 +255,19 @@ func resultFromMismatch(jtkLegacy, cflLegacy *credstore.LegacyCreds, choice stri
 		store.JTK.Section = credstore.Section{}
 		store.CFL.Section = credstore.Section{}
 		var cfg *config.Config
+		chosenTool := credstore.ToolJTK
 		if choice == "use_jtk" {
 			cfg = configFromLegacy(jtkLegacy)
 		} else {
 			cfg = configFromLegacy(cflLegacy)
 			cfg.DefaultProject = jtkLegacy.DefaultProject
+			chosenTool = credstore.ToolCFL
 		}
 		applyFlagOverrides(cfg, prefillURL, prefillEmail, prefillToken, prefillAuthMethod, prefillCloudID)
-		return &reconcileResult{prefill: cfg, target: writeDefault, store: store, consumedLegacies: consumed}
+		// Signal the cross-tool unify; the command layer (initcmd.go) does
+		// the keyring resolve+persist. reconcile.go stays keyring-free so
+		// it remains unit-testable without OS-keychain isolation.
+		return &reconcileResult{prefill: cfg, target: writeDefault, store: store, consumedLegacies: consumed, unifyBoth: true, unifySource: chosenTool}
 	case "keep_different":
 		// Both tools land in their override sections so the split is
 		// stable: store.Default stays empty, jtk reads its override,

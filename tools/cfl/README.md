@@ -530,7 +530,11 @@ Manage cfl configuration.
 
 #### `cfl config show`
 
-Display current configuration with masked credentials and source info.
+Display the resolved configuration, including the keyring ref, backend,
+and whether a token is configured (the token value itself is never
+displayed). Token/keyring reporting is authoritative; the non-secret rows
+reflect env + the legacy per-tool file only, so a value set solely in the
+shared store appears as "-" there even though cfl uses it at runtime.
 
 ```bash
 cfl config show
@@ -546,11 +550,18 @@ cfl config test
 
 #### `cfl config clear`
 
-Remove the stored configuration file.
+Remove cfl's resolved token key from the OS keyring (`cfl_api_token` if a
+cfl override exists, otherwise the shared `api_token` — you are warned
+when clearing the shared key, since jtk also uses it). `--all` removes the
+entire shared bundle plus the non-secret config file and scrubs any
+surviving legacy plaintext files; `--all` still cleans the plaintext
+artifacts even when the keyring itself cannot be opened (the recovery
+path).
 
 ```bash
 cfl config clear
 cfl config clear --force
+cfl config clear --all
 ```
 
 | Flag | Short | Default | Description |
@@ -772,13 +783,15 @@ The text before `:` is treated as a space key if it contains only uppercase lett
 
 ## Configuration
 
-`cfl init` writes credentials to the shared store at `~/.config/atlassian-cli/config.yml`:
+`cfl init` stores the **API token in your OS keyring** (macOS Keychain /
+Linux Secret Service / Windows Credential Manager, or an opt-in
+encrypted-file backend) and writes only **non-secret** config to the
+shared store at `~/.config/atlassian-cli/config.yml`:
 
 ```yaml
 default:
   url: https://mycompany.atlassian.net   # base URL; cfl appends /wiki on read
   email: you@example.com
-  api_token: your-api-token
   auth_method: basic                     # or "bearer"
   cloud_id: ""                           # required for bearer
 cfl:
@@ -786,9 +799,18 @@ cfl:
   output_format: table
 ```
 
-The same file is shared with `jtk` — one Atlassian token, both tools. Run `cfl init` after `jtk init` (or vice versa) and you'll be offered to reuse the credentials. If you really need different tokens per tool, init's reconciliation flow lets you write per-tool overrides into the `cfl:` or `jtk:` section.
+There is **no `api_token:` field** — the secret never touches a
+plaintext file. The same config file and keyring bundle are shared with
+`jtk` — one Atlassian token, both tools. Run `cfl init` after `jtk init`
+(or vice versa) and you'll be offered to reuse the credentials. To set a
+token non-interactively: `cfl set-credential` (reads stdin or
+`--from-env VAR`).
 
-Legacy `~/.config/cfl/config.yml` keeps working indefinitely. Init detects it on first run and prompts to migrate. If your legacy URL ends in `/wiki`, migration strips it: the shared store always holds the base URL and cfl appends `/wiki` on read.
+Legacy `~/.config/cfl/config.yml` keeps working indefinitely. The first
+command auto-migrates any pre-existing plaintext token into the keyring
+and scrubs the plaintext in place. If your legacy URL ends in `/wiki`,
+migration strips it: the shared store always holds the base URL and cfl
+appends `/wiki` on read.
 
 ### Environment Variables
 
@@ -798,7 +820,7 @@ Environment variables override file-based config. Variables are checked in order
 |---------|-------------------------------|
 | URL | `CFL_URL` → `ATLASSIAN_URL` → shared `cfl` override → shared `default` → legacy file |
 | Email | `CFL_EMAIL` → `ATLASSIAN_EMAIL` → shared `cfl` → shared `default` → legacy |
-| API Token | `CFL_API_TOKEN` → `ATLASSIAN_API_TOKEN` → shared `cfl` → shared `default` → legacy |
+| API Token | `CFL_API_TOKEN` → `ATLASSIAN_API_TOKEN` → keyring `cfl_api_token` → keyring `api_token` (OS keyring, never a plaintext file) |
 | Default Space | `CFL_DEFAULT_SPACE` → shared `cfl.default_space` → legacy |
 | Auth Method | `CFL_AUTH_METHOD` → `ATLASSIAN_AUTH_METHOD` → shared → legacy → `basic` |
 | Cloud ID | `CFL_CLOUD_ID` → `ATLASSIAN_CLOUD_ID` → shared → legacy |

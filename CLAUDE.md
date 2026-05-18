@@ -118,13 +118,16 @@ Tool-specific variables (`CFL_*`, `JIRA_*`) take precedence over shared variable
 
 ## Shared credential store
 
-`cfl init` and `jtk init` both write to `~/.config/atlassian-cli/config.yml` (mode 0600). One token, both tools. Schema:
+The **API token is stored in the OS keyring** (macOS Keychain / Linux
+Secret Service / Windows Credential Manager, or an opt-in encrypted-file
+backend) — never in a plaintext file. Only **non-secret** config lives in
+`~/.config/atlassian-cli/config.yml` (mode 0600), written by `cfl init`
+and `jtk init`:
 
 ```yaml
 default:
   url: https://acme.atlassian.net   # base URL; cfl appends /wiki on read
   email: u@example.com
-  api_token: <token>
   auth_method: basic                # or "bearer"
   cloud_id: <id>                    # required for bearer
 cfl:
@@ -134,17 +137,49 @@ jtk:
   default_project: PROJ             # jtk-only defaults
 ```
 
-The `cfl` and `jtk` sections may also carry credential overrides (`url`, `email`, `api_token`, `auth_method`, `cloud_id`) for the rare case where users want different tokens per tool. Per-field merge: a `cfl.api_token` override doesn't shadow `default.email`.
+Note: there is **no `api_token:` field** — the secret is in the keyring.
+The `cfl`/`jtk` sections may still carry non-secret per-tool overrides
+(`url`, `email`, `auth_method`, `cloud_id`); per-field merge applies.
 
-**Resolution precedence (highest wins):**
+Keyring bundle: fixed ref `atlassian-cli/default`, keys `api_token`
+(shared default), `cfl_api_token`, `jtk_api_token` (per-tool overrides).
+Backend selection is env-only (`ATLASSIAN_CLI_KEYRING_BACKEND`); leave it
+unset to auto-select the OS keyring, or set it to `file` for the opt-in
+encrypted-file backend. The file-backend passphrase comes from
+`ATLASSIAN_CLI_KEYRING_PASSPHRASE` or a no-echo TTY prompt. **The file
+backend cannot prompt non-interactively:** any non-TTY invocation (CI, a
+piped token) MUST pre-set `ATLASSIAN_CLI_KEYRING_PASSPHRASE`, and the
+passphrase can never share stdin with a piped token.
 
-1. Tool-specific env (`CFL_*` / `JIRA_*`)
-2. `ATLASSIAN_*` env
-3. Shared store, tool override section
-4. Shared store, `default` section
-5. Legacy per-tool config (`~/.config/cfl/config.yml`; jtk uses `os.UserConfigDir()` so macOS is `~/Library/Application Support/jira-ticket-cli/config.json`, Linux is `~/.config/jira-ticket-cli/config.json`)
+**Token resolution precedence (highest wins):**
 
-Legacy files keep working indefinitely. Init detects them, prompts to migrate, and offers cleanup. If both tools' legacy files have different credentials, init runs a reconciliation flow (use cfl's, use jtk's, or keep them different) and educates the user that one Atlassian token usually works for both products.
+1. Tool-specific env (`CFL_API_TOKEN` / `JIRA_API_TOKEN`)
+2. `ATLASSIAN_API_TOKEN` env
+3. Keyring per-tool key (`cfl_api_token` / `jtk_api_token`)
+4. Keyring shared `api_token`
+
+Non-secret fields keep their previous precedence (env → shared store
+override → shared default → legacy file).
+
+**One-time auto-migration:** the first API/`test`/`init` invocation that
+actually opens the keyring moves any pre-existing plaintext token (shared
+`config.yml` *or* a legacy per-tool file) into the keyring and scrubs the
+plaintext in place, printing a one-line notice. Legacy non-secret files
+keep working; init still detects/reconciles them. **Caveat:** when an
+API-token env var is set it wins outright and the keyring is not opened,
+so migration is deferred until an invocation actually needs the keyring
+(`init`/`set-credential`, or a command run without the env var). A user
+who *permanently* exports the token via env therefore keeps the plaintext
+file until they run `init`/`set-credential` — env is an explicit runtime
+override, so a read path is never forced to mutate disk behind it.
+
+**Non-interactive ingress:** `cfl set-credential` / `jtk set-credential`
+read a token from stdin or `--from-env VAR` and store it in the keyring
+(never echoed). `config show` reports token presence + source + keyring
+backend only (never the value). `config clear` removes the tool's
+resolved key (warning when it is the shared `api_token` that the sibling
+also uses); `config clear --all` removes the whole bundle plus the
+non-secret config file.
 
 ## Git History
 
