@@ -2,27 +2,31 @@ package cache
 
 import (
 	"errors"
-	"strings"
 	"testing"
 
 	"github.com/open-cli-collective/atlassian-go/testutil"
+	"github.com/open-cli-collective/cli-common/statedir"
+	"github.com/open-cli-collective/cli-common/statedirtest"
 )
 
 func TestRoot_DefaultExpansion(t *testing.T) {
-	// Clear any override
+	// MON-5369: the default cache root is now os.UserCacheDir()/jtk via the
+	// shared cli-common resolver (was ~/.jtk/cache). Hermetic so it never
+	// touches the developer's real cache dir.
+	statedirtest.Hermetic(t)
 	cleanup := SetRootForTest("")
 	defer cleanup()
 
 	root, err := Root()
 	testutil.NoError(t, err)
 
-	// Verify it ends with /.jtk/cache
-	if !strings.HasSuffix(root, "/.jtk/cache") {
-		t.Errorf("Root() should end with /.jtk/cache, got %q", root)
-	}
+	want, err := statedir.Cache{Tool: "jtk"}.CacheDir()
+	testutil.NoError(t, err)
+	testutil.Equal(t, root, want)
 }
 
 func TestRoot_RespectSetRootForTest(t *testing.T) {
+	statedirtest.Hermetic(t)
 	tempDir := t.TempDir()
 
 	// Override the root
@@ -36,12 +40,12 @@ func TestRoot_RespectSetRootForTest(t *testing.T) {
 	// Clean up should restore prior value
 	cleanup()
 
-	// After cleanup, Root should return default again
+	// After cleanup, Root should return the default (shared resolver) again.
 	root, err = Root()
 	testutil.NoError(t, err)
-	if !strings.HasSuffix(root, "/.jtk/cache") {
-		t.Errorf("After cleanup, Root() should end with /.jtk/cache, got %q", root)
-	}
+	want, err := statedir.Cache{Tool: "jtk"}.CacheDir()
+	testutil.NoError(t, err)
+	testutil.Equal(t, root, want)
 }
 
 func TestInstanceKey_BasicAuth(t *testing.T) {
@@ -104,6 +108,10 @@ func TestInstanceKey_RejectsPathInjection(t *testing.T) {
 		{"cloudID with forward slash", "https://api.atlassian.com", "foo/bar"},
 		{"cloudID with backslash", "https://api.atlassian.com", `foo\bar`},
 		{"cloudID with space", "https://api.atlassian.com", "foo bar"},
+		// Trailing dot: the regex would accept it, so the HasSuffix guard is
+		// the sole protection (Windows strips trailing dots → collision).
+		{"cloudID with trailing dot", "https://api.atlassian.com", "foo."},
+		{"hostname with trailing dot", "https://foo./", ""},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -132,6 +140,7 @@ func TestSetInstanceKeyForTest_RejectsUnsafeKeys(t *testing.T) {
 		`foo\bar`,
 		"",
 		"foo bar",
+		"foo.", // trailing dot — sole-protected by the HasSuffix guard
 	}
 	for _, tc := range cases {
 		tc := tc
