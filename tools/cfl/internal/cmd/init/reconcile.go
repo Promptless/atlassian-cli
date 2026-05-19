@@ -44,6 +44,25 @@ func detectAndReconcile(
 	cflLegacyPath, jtkLegacyPath, sharedPath string,
 	prefillURL, prefillEmail, prefillAuthMethod, prefillCloudID string,
 ) (*reconcileResult, error) {
+	// §3.2 PURE pre-token relocation gate: runs BEFORE per-tool
+	// divergence detection and BEFORE any mutation. A corrupt old/new
+	// file or a divergent old↔new shared config fails loud here naming
+	// both paths, mutating nothing — consistent with the fail-loud,
+	// mutate-nothing invariant.
+	rel, relErr := credstore.DetectSharedRelocation(sharedPath)
+	if relErr != nil {
+		if errors.Is(relErr, credstore.ErrCorruptStore) {
+			// A corrupt old OR new shared file: same contract/UX as the
+			// Load path below — unreadable, refuse to overwrite.
+			v.Error("Shared credential store at %s is unreadable: %v", sharedPath, relErr)
+			v.Error("Refusing to overwrite. Fix or remove the file, then re-run cfl init.")
+		} else {
+			v.Error("Shared credential store relocation check failed: %v", relErr)
+			v.Error("Refusing to mutate anything. Reconcile the named file(s), then re-run cfl init.")
+		}
+		return nil, relErr
+	}
+
 	store, err := credstore.Load(sharedPath)
 	if err != nil {
 		v.Error("Shared credential store at %s is unreadable: %v", sharedPath, err)
@@ -81,9 +100,33 @@ func detectAndReconcile(
 	// Build the full named connection candidate set and detect
 	// divergence (pure, secret-free, no IO/keyring — shared with jtk).
 	candidates := credstore.ConnCandidates(sharedPath, store.Default, proj, cflLegacy, jtkLegacy)
+	// Old-shared is ADDITIVE to the candidate set so a relocation copy
+	// is gated on the per-tool divergence check passing (no copy while a
+	// divergence is pending).
+	candidates = append(candidates, credstore.OldSharedConnCandidates(rel)...)
 	chosen, conflicts := credstore.DetectConnDivergence(candidates)
 	if len(conflicts) > 0 {
 		return nil, credstore.ConnConflictError(conflicts, candidates, "cfl")
+	}
+
+	// Gated apply: every conflict gate (relocation + per-tool
+	// divergence) has now passed — materialize the old shared file at
+	// the new path (copy-leave-old), then reload so the remainder
+	// reconciles the materialized file exactly as a returning user.
+	if rel.CopyNeeded {
+		if aerr := credstore.ApplySharedRelocation(rel); aerr != nil {
+			v.Error("Could not relocate the shared credential store: %v", aerr)
+			return nil, aerr
+		}
+		// Reload only the canonical store: the divergence candidates
+		// (incl. old-shared) were already built and checked above, so
+		// `proj` is not read again — the materialized store is what the
+		// fold + preserveDefaults below operate on.
+		store, err = credstore.Load(sharedPath)
+		if err != nil {
+			v.Error("Shared credential store at %s is unreadable: %v", sharedPath, err)
+			return nil, err
+		}
 	}
 
 	// affectsSibling must be judged on the ORIGINAL loaded store, BEFORE

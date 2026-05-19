@@ -123,11 +123,14 @@ func DefaultConfigPath() string {
 	return filepath.Join(home, ".config", "cfl", "config.yml")
 }
 
-// Save writes the configuration to the specified path.
+// Save writes the configuration atomically (temp + rename) so a crash
+// mid-write never leaves a truncated config behind. Dir mode is 0700
+// and file mode 0600 (the §3 on-disk-state standard). On any error the
+// temp file is removed best-effort so a failed save leaves no stale
+// .tmp.
 func (c *Config) Save(path string) error {
-	// Create directory if it doesn't exist
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0750); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("creating config directory: %w", err)
 	}
 
@@ -136,9 +139,14 @@ func (c *Config) Save(path string) error {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
 
-	// Write with restricted permissions (user read/write only)
-	if err := os.WriteFile(path, data, 0600); err != nil {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		_ = os.Remove(tmp)
 		return fmt.Errorf("writing config file: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("finalizing config file: %w", err)
 	}
 
 	return nil
@@ -195,6 +203,11 @@ var corruptSharedWarnOnce sync.Once
 
 func warnCorruptSharedOnce(err error) {
 	corruptSharedWarnOnce.Do(func() {
+		if errors.Is(err, credstore.ErrRelocationConflict) {
+			// Readable, not a fallback: the canonical config is in use.
+			fmt.Fprintf(os.Stderr, "warning: prior and current shared config diverge (%v); using the current config. Run `cfl init` to reconcile.\n", err)
+			return
+		}
 		fmt.Fprintf(os.Stderr, "warning: shared credential store is unreadable (%v); falling back to per-tool config. Run `cfl init` to fix.\n", err)
 	})
 }
@@ -227,14 +240,18 @@ func LoadWithEnv(path string) (*Config, error) {
 		cfg = &Config{}
 	}
 
-	store, sErr := credstore.Load(credstore.DefaultPath())
+	// Runtime shared resolver, §3.2 relocation-aware and mutation-free:
+	// reads the canonical store, transparently falls back to the prior
+	// hand-rolled location when only it exists, and on an old↔new
+	// divergence returns the canonical store alongside the error so the
+	// command keeps working while the conflict is surfaced once. A nil
+	// store (unresolvable/corrupt) → fall back to legacy + env. `cfl
+	// init` uses the fail-loud detect/gated-copy path instead.
+	store, sErr := credstore.LoadSharedRuntime()
 	if sErr != nil {
-		// Runtime callers can't propagate the error meaningfully — every
-		// cfl command would die. Warn once on stderr and fall back to
-		// legacy + env. `cfl init` uses credstore.Load directly so it
-		// can surface the error and refuse to clobber.
 		warnCorruptSharedOnce(sErr)
-	} else {
+	}
+	if store != nil {
 		cfg.LoadFromShared(store)
 	}
 

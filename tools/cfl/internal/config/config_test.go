@@ -259,6 +259,25 @@ func TestConfig_Save_and_Load(t *testing.T) {
 	testutil.Equal(t, original.OutputFormat, loaded.OutputFormat)
 }
 
+// Save is atomic (temp+rename) with 0600 file / 0700 dir and leaves no
+// stale .tmp on success (the MON-5370 commit-4 hardening).
+func TestConfig_Save_AtomicPermsNoStaleTmp(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "cfl")
+	configPath := filepath.Join(dir, "config.yml")
+	testutil.RequireNoError(t, (&Config{URL: "https://acme.atlassian.net"}).Save(configPath))
+
+	fi, err := os.Stat(configPath)
+	testutil.RequireNoError(t, err)
+	testutil.Equal(t, os.FileMode(0o600), fi.Mode().Perm())
+	di, err := os.Stat(dir)
+	testutil.RequireNoError(t, err)
+	testutil.Equal(t, os.FileMode(0o700), di.Mode().Perm())
+	if _, statErr := os.Stat(configPath + ".tmp"); !os.IsNotExist(statErr) {
+		t.Fatal("atomic Save must leave no .tmp on success")
+	}
+}
+
 func TestLoad_FileNotFound(t *testing.T) {
 	t.Parallel()
 	_, err := Load("/nonexistent/path/config.yml")
@@ -522,9 +541,9 @@ func TestConfig_LoadFromShared(t *testing.T) {
 }
 
 func TestLoadWithEnv_PrecedenceLegacyToSharedToEnv(t *testing.T) {
-	// Isolate XDG so credstore.DefaultPath points into a tempdir.
-	xdg := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", xdg)
+	// Hermetic 7-var isolation; derive the shared path from the
+	// resolver (cross-OS correct) rather than hand-building the layout.
+	credtest.Hermetic(t)
 
 	// Seed legacy file (cfl-only).
 	legacyDir := t.TempDir()
@@ -537,7 +556,7 @@ func TestLoadWithEnv_PrecedenceLegacyToSharedToEnv(t *testing.T) {
 	testutil.RequireNoError(t, legacy.Save(legacyPath))
 
 	// Seed shared store (overrides URL + token via default).
-	sharedPath := filepath.Join(xdg, "atlassian-cli", "config.yml")
+	sharedPath := credtest.SharedConfigPath(t)
 	store := &credstore.Store{
 		Default: credstore.Section{
 			URL:      "https://shared.atlassian.net",
@@ -567,8 +586,8 @@ func TestLoadWithEnv_CorruptSharedFallsBackToLegacy(t *testing.T) {
 	// Hermetic: deterministic file-backend keyring (so the corrupt-store
 	// fallback resolves an empty token instead of touching the OS
 	// keychain) and isolated XDG.
-	xdg := credtest.Hermetic(t)
-	sharedPath := filepath.Join(xdg, "atlassian-cli", "config.yml")
+	credtest.Hermetic(t)
+	sharedPath := credtest.SharedConfigPath(t)
 	testutil.RequireNoError(t, os.MkdirAll(filepath.Dir(sharedPath), 0o700))
 	testutil.RequireNoError(t, os.WriteFile(sharedPath, []byte("default: : :: ["), 0o600))
 

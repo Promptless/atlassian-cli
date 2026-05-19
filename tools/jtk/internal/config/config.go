@@ -21,10 +21,18 @@ import (
 // reads. Init has a separate code path that surfaces corruption as a
 // hard error and refuses to clobber the file.
 func loadShared() *credstore.Store {
-	s, err := credstore.Load(credstore.DefaultPath())
+	// §3.2 relocation-aware, mutation-free runtime resolver: canonical
+	// store, transparent read-fallback to the prior hand-rolled location
+	// when only it exists, and on an old↔new divergence the canonical
+	// store is returned alongside the error so commands keep working
+	// while the conflict is surfaced once. `jtk init` is the fail-loud
+	// mutating gate.
+	s, err := credstore.LoadSharedRuntime()
 	if err != nil {
 		warnCorruptSharedOnce(err)
-		return &credstore.Store{}
+		if s == nil {
+			return &credstore.Store{}
+		}
 	}
 	return s
 }
@@ -33,6 +41,11 @@ var corruptSharedWarnOnce sync.Once
 
 func warnCorruptSharedOnce(err error) {
 	corruptSharedWarnOnce.Do(func() {
+		if errors.Is(err, credstore.ErrRelocationConflict) {
+			// Readable, not a fallback: the canonical config is in use.
+			fmt.Fprintf(os.Stderr, "warning: prior and current shared config diverge (%v); using the current config. Run `jtk init` to reconcile.\n", err)
+			return
+		}
 		fmt.Fprintf(os.Stderr, "warning: shared credential store is unreadable (%v); falling back to per-tool config. Run `jtk init` to fix.\n", err)
 	})
 }
@@ -122,8 +135,18 @@ func Save(cfg *Config) error {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, configFileMode); err != nil {
+	// Atomic write (temp + rename) so a crash mid-write never leaves a
+	// truncated config. Dir/file modes are already 0700/0600 (the §3
+	// on-disk-state standard). On any error the temp file is removed
+	// best-effort so a failed save leaves no stale .tmp.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, configFileMode); err != nil {
+		_ = os.Remove(tmp)
 		return fmt.Errorf("writing config file: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("finalizing config file: %w", err)
 	}
 
 	return nil
