@@ -78,6 +78,21 @@ type Config struct {
 	DefaultProject string `json:"default_project,omitempty"`
 	AuthMethod     string `json:"auth_method,omitempty"` // "basic" (default) or "bearer"
 	CloudID        string `json:"cloud_id,omitempty"`    // Required for bearer auth (gateway URL)
+	// Keyring's `omitempty` is a no-op on this struct type — encoding/json
+	// emits an empty {} for zero-valued struct fields regardless. Kept for
+	// stylistic consistency with the other optional fields; the empty
+	// section is harmless on read.
+	Keyring KeyringConfig `json:"keyring,omitempty"`
+}
+
+// KeyringConfig holds keyring-related user preferences.
+type KeyringConfig struct {
+	// Backend, when set, requests a specific credstore backend at runtime.
+	// Lower precedence than --backend and ATLASSIAN_CLI_KEYRING_BACKEND.
+	// Valid values: see credstore.ValidBackendNames(). Validation happens
+	// inside credstore.Open at startup; an unrecognized value fails closed
+	// with an error wrapping ErrBackendNotImplemented.
+	Backend string `json:"backend,omitempty"`
 }
 
 // configPath returns the path to the config file
@@ -130,7 +145,10 @@ func Save(cfg *Config) error {
 	// one-time keyring migration can find it (asymmetric codec).
 	toWrite := *cfg
 	toWrite.APIToken = ""
-	data, err := json.MarshalIndent(&toWrite, "", "  ")
+	// The APIToken field is stripped above before marshaling, so this
+	// path never persists secret material. gosec G117's name-pattern
+	// check can't see the explicit zeroing.
+	data, err := json.MarshalIndent(&toWrite, "", "  ") //nolint:gosec // APIToken stripped above
 	if err != nil {
 		return fmt.Errorf("marshaling config: %w", err)
 	}

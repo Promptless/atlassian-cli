@@ -3,18 +3,59 @@ package keyring
 import (
 	"errors"
 	"fmt"
-	"os"
 	"slices"
 	"strings"
+	"sync"
 
 	cccredstore "github.com/open-cli-collective/cli-common/credstore"
 )
 
-// BackendEnvVar selects the credstore backend (§1.4). Empty = auto-select
-// (OS keyring, fail-closed on Linux); "file" = the encrypted-file backend
-// (passphrase via ATLASSIAN_CLI_KEYRING_PASSPHRASE or a no-echo TTY
-// prompt). There is no config-file backend field — selection is env-only.
-const BackendEnvVar = "ATLASSIAN_CLI_KEYRING_BACKEND"
+// SetBackendSelection wires backend selection from the CLI root command
+// (which parsed --backend and read keyring.backend from config) into
+// the package-level state consulted by every Open* variant.
+//
+// Precedence is enforced inside credstore.Open against the final
+// Options: Options.Backend (set by --backend) > <SERVICE>_KEYRING_BACKEND
+// env > Options.ConfigBackend (set by config) > OS default. This package
+// MUST NOT read <SERVICE>_KEYRING_BACKEND itself — credstore reads it,
+// and remapping it here would corrupt SourceEnv attribution.
+//
+// In practice callers invoke this once during root-command
+// PersistentPreRunE before any Open* runs, but the mutex guards against
+// surprise concurrent callers (test code rebuilding the command tree,
+// future goroutine-launching subcommands) so the read-then-write race
+// can't return torn or stale state.
+func SetBackendSelection(backend, configBackend cccredstore.Backend) {
+	backendMu.Lock()
+	defer backendMu.Unlock()
+	selectedBackend = backend
+	selectedConfigBackend = configBackend
+}
+
+// selectedBackend / selectedConfigBackend hold the values most recently
+// set by SetBackendSelection (typically once, by the root command's
+// PersistentPreRunE). Both default to the empty Backend, which makes
+// Open* equivalent to "no caller override," letting credstore's own
+// precedence machinery run unaffected. Always read/written under
+// backendMu.
+var (
+	backendMu             sync.RWMutex
+	selectedBackend       cccredstore.Backend
+	selectedConfigBackend cccredstore.Backend
+)
+
+// GetBackendSelection returns the current package-level backend
+// selection as set by SetBackendSelection. openRef uses it internally
+// to source the Backend / ConfigBackend fields of credstore.Options,
+// and tests use it to assert that the root command's wiring populated
+// the right values. Callers outside this package must NOT use it to
+// drive their own credstore.Open calls — the selection is set once by
+// the CLI root command and consumed by Open* in this package.
+func GetBackendSelection() (backend, configBackend cccredstore.Backend) {
+	backendMu.RLock()
+	defer backendMu.RUnlock()
+	return selectedBackend, selectedConfigBackend
+}
 
 // ErrTokenNotFound indicates no API token exists in the keyring.
 var ErrTokenNotFound = errors.New("no API token found in secure storage")
@@ -88,20 +129,16 @@ func openRef(ref string, allow []string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid credential ref %q: %w", ref, err)
 	}
-	opts := &cccredstore.Options{AllowedKeys: allow}
-	switch b := strings.TrimSpace(os.Getenv(BackendEnvVar)); b {
-	case "":
-		// Auto-select per §1.4 (credstore decides; fail-closed on Linux).
-	case "file":
-		opts.ConfigBackend = cccredstore.BackendFile
-	default:
-		// Fail closed: an unrecognized backend must not silently degrade.
-		// Be explicit that the OS keyring is the unset/auto default — a
-		// user typing "keychain"/"secret-service" is reaching for what
-		// they already get by leaving this unset.
-		return nil, fmt.Errorf(
-			"invalid %s %q: the only recognized value is \"file\" (opt-in encrypted-file backend); leave %s unset to auto-select the OS keyring (macOS Keychain / Linux Secret Service / Windows Credential Manager)",
-			BackendEnvVar, b, BackendEnvVar)
+	// Backend / ConfigBackend come from the root command (SetBackendSelection)
+	// — both default to empty when the root never wired the flag, which is
+	// the right behavior for code paths that build a Store outside the
+	// cobra layer (tests, internal helpers). Validation and precedence
+	// (--backend > env > config > default) are credstore.Open's job.
+	selB, selCB := GetBackendSelection()
+	opts := &cccredstore.Options{
+		AllowedKeys:   allow,
+		Backend:       selB,
+		ConfigBackend: selCB,
 	}
 	opts.FilePassphrase = passphraseFunc(service)
 
