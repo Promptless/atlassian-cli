@@ -40,6 +40,13 @@ This action cannot be undone.`,
 }
 
 func runDelete(ctx context.Context, opts *root.Options, ruleID string, force bool) error {
+	// §3.4: short-circuit BEFORE any API call so --non-interactive without
+	// --force returns ErrConfirmationRequired even if the API lookup
+	// would have failed first (auth/not-found/network).
+	if opts.NonInteractive && !force {
+		return prompt.ErrConfirmationRequired
+	}
+
 	client, err := opts.APIClient()
 	if err != nil {
 		return err
@@ -50,20 +57,24 @@ func runDelete(ctx context.Context, opts *root.Options, ruleID string, force boo
 		return err
 	}
 
-	if !force {
+	// Defense-in-depth: the early --non-interactive short-circuit above
+	// would have returned by now, but pinning the gate on both `force`
+	// and `NonInteractive` keeps the policy consistent with issues/page/
+	// attachment delete so a future refactor that moves the short-circuit
+	// can't leak warning text to stderr under --non-interactive.
+	if !force && !opts.NonInteractive {
 		fmt.Fprintf(opts.Stderr, "This will permanently delete rule %q (%s). This action cannot be undone.\n", current.Name, ruleID)
 		fmt.Fprint(opts.Stderr, "Are you sure? [y/N]: ")
-
-		confirmed, err := prompt.Confirm(opts.Stdin)
-		if err != nil {
-			return fmt.Errorf("reading confirmation: %w", err)
-		}
-		if !confirmed {
-			model := jtkpresent.AutomationPresenter{}.PresentDeleteCancelled()
-			out := present.Render(model, opts.RenderStyle())
-			fmt.Fprint(opts.Stdout, out.Stdout)
-			return nil
-		}
+	}
+	confirmed, err := prompt.ConfirmOrFail(force, opts.NonInteractive, opts.Stdin)
+	if err != nil {
+		return err
+	}
+	if !confirmed {
+		model := jtkpresent.AutomationPresenter{}.PresentDeleteCancelled()
+		out := present.Render(model, opts.RenderStyle())
+		fmt.Fprint(opts.Stdout, out.Stdout)
+		return nil
 	}
 
 	// API rejects DELETE on ENABLED rules — disable first.

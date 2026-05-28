@@ -41,6 +41,14 @@ func newDeleteCmd(rootOpts *root.Options) *cobra.Command {
 }
 
 func runDelete(ctx context.Context, spaceKey string, opts *deleteOptions) error {
+	// §3.4: short-circuit BEFORE any side-effecting check so
+	// --non-interactive without --force returns ErrConfirmationRequired
+	// regardless of output-format validity, API auth/not-found, or
+	// network state. Other validation errors would mask the real cause.
+	if opts.NonInteractive && !opts.force {
+		return prompt.ErrConfirmationRequired
+	}
+
 	if err := view.ValidateFormat(opts.Output); err != nil {
 		return err
 	}
@@ -57,18 +65,17 @@ func runDelete(ctx context.Context, spaceKey string, opts *deleteOptions) error 
 
 	v := opts.View()
 
-	if !opts.force {
+	if !opts.force && !opts.NonInteractive {
 		_, _ = fmt.Fprintf(opts.Stderr, "About to delete space: %s (%s)\n", space.Name, space.Key)
 		_, _ = fmt.Fprint(opts.Stderr, "Are you sure? [y/N]: ")
-
-		confirmed, err := prompt.Confirm(opts.Stdin)
-		if err != nil {
-			return fmt.Errorf("reading confirmation: %w", err)
-		}
-		if !confirmed {
-			_, _ = fmt.Fprintln(opts.Stderr, "Deletion cancelled.")
-			return nil
-		}
+	}
+	confirmed, err := prompt.ConfirmOrFail(opts.force, opts.NonInteractive, opts.Stdin)
+	if err != nil {
+		return err
+	}
+	if !confirmed {
+		_, _ = fmt.Fprintln(opts.Stderr, "Deletion cancelled.")
+		return nil
 	}
 
 	if err := client.DeleteSpace(ctx, spaceKey); err != nil {
