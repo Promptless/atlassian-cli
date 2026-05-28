@@ -172,11 +172,22 @@ process_page() {
     fi
     printf '%s' "$md_content" > "$staging_md"
 
-    # Step 4: Create test page from markdown
+    # Step 4: Create test page from markdown.
+    # JSON output was removed in #392; parse the ID line from the default
+    # text output instead. --no-color keeps the parser robust against any
+    # future ANSI styling around the key:value pairs. The gsub() in awk
+    # trims leading/trailing whitespace so RenderKeyValue emitting "ID:  12345"
+    # (two spaces) still yields "12345" rather than " 12345".
+    local create_output
+    if ! create_output=$(printf '%s' "$md_content" | cfl --no-color page create -s "$SPACE" -t "[Test] Roundtrip $id" --legacy 2>&1); then
+        echo "[$id] FAIL: cfl page create exited non-zero: $create_output"
+        FAIL=$((FAIL + 1))
+        return 1
+    fi
     local new_id
-    new_id=$(printf '%s' "$md_content" | cfl page create -s "$SPACE" -t "[Test] Roundtrip $id" --legacy -o json 2>/dev/null | jq -r '.id') || true
-    if [[ -z "$new_id" || "$new_id" == "null" ]]; then
-        echo "[$id] FAIL: Could not create test page"
+    new_id=$(printf '%s' "$create_output" | awk -F: '/^ID:/ {sub(/^[ \t]+/, "", $2); sub(/[ \t]+$/, "", $2); print $2; exit}')
+    if [[ -z "$new_id" ]]; then
+        echo "[$id] FAIL: Could not parse page ID from cfl page create output: $create_output"
         FAIL=$((FAIL + 1))
         return 1
     fi

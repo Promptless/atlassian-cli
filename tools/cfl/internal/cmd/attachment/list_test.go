@@ -69,6 +69,9 @@ func TestRunList_Empty(t *testing.T) {
 
 	err := runList(context.Background(), opts)
 	testutil.RequireNoError(t, err)
+	// The empty-results banner used to be suppressed under -o json; #392
+	// removed that skip, so the banner now always prints to stderr.
+	testutil.Contains(t, rootOpts.Stderr.(*bytes.Buffer).String(), "No attachments found.")
 }
 
 func TestRunList_APIError(t *testing.T) {
@@ -92,33 +95,6 @@ func TestRunList_APIError(t *testing.T) {
 	err := runList(context.Background(), opts)
 	testutil.RequireError(t, err)
 	testutil.Contains(t, err.Error(), "listing attachments")
-}
-
-func TestRunList_JSONOutput(t *testing.T) {
-	t.Parallel()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{
-			"results": [
-				{"id": "att1", "title": "doc.pdf", "mediaType": "application/pdf", "fileSize": 1024}
-			]
-		}`))
-	}))
-	defer server.Close()
-
-	rootOpts := newListTestRootOptions()
-	rootOpts.Output = "json"
-	client := api.NewClient(server.URL, "test@example.com", "token")
-	rootOpts.SetAPIClient(client)
-
-	opts := &listOptions{
-		Options: rootOpts,
-		pageID:  "12345",
-		limit:   25,
-	}
-
-	err := runList(context.Background(), opts)
-	testutil.RequireNoError(t, err)
 }
 
 func TestRunList_InvalidOutputFormat(t *testing.T) {
@@ -352,4 +328,5 @@ func TestRunList_UnusedFlag_NoUnused(t *testing.T) {
 
 	err := runList(context.Background(), opts)
 	testutil.RequireNoError(t, err)
+	testutil.Contains(t, rootOpts.Stderr.(*bytes.Buffer).String(), "No unused attachments found.")
 }
