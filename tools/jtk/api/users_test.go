@@ -134,21 +134,21 @@ func TestSearchUsers(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		testutil.Equal(t, r.URL.Path, "/rest/api/3/user/search")
 		testutil.Equal(t, r.URL.Query().Get("query"), "john")
-		users := []User{
+		_, _ = w.Write([]byte(`[
 			{
-				AccountID:    "5b10ac8d82e05b22cc7d4ef5",
-				DisplayName:  "John Smith",
-				EmailAddress: "john@example.com",
-				Active:       true,
+				"accountId": "5b10ac8d82e05b22cc7d4ef5",
+				"accountType": "atlassian",
+				"displayName": "John Smith",
+				"emailAddress": "john@example.com",
+				"active": true
 			},
 			{
-				AccountID:    "5b10ac8d82e05b22cc7d4ef6",
-				DisplayName:  "John Doe",
-				EmailAddress: "johnd@example.com",
-				Active:       true,
-			},
-		}
-		_ = json.NewEncoder(w).Encode(users)
+				"accountId": "5b10ac8d82e05b22cc7d4ef6",
+				"displayName": "John Doe",
+				"emailAddress": "johnd@example.com",
+				"active": true
+			}
+		]`))
 	}))
 	defer server.Close()
 
@@ -163,6 +163,7 @@ func TestSearchUsers(t *testing.T) {
 	users, err := client.SearchUsers(context.Background(), "john", 0, 0)
 	testutil.RequireNoError(t, err)
 	testutil.Len(t, users, 2)
+	testutil.Equal(t, users[0].AccountType, "atlassian")
 	testutil.Equal(t, users[0].DisplayName, "John Smith")
 	testutil.Equal(t, users[1].DisplayName, "John Doe")
 }
