@@ -153,6 +153,7 @@ func TestRunEdit_PageNotFound(t *testing.T) {
 	err := runEdit(context.Background(), opts)
 	testutil.RequireError(t, err)
 	testutil.Contains(t, err.Error(), "getting page")
+	testutil.NotContains(t, err.Error(), "getting page: getting page:")
 }
 
 func TestRunEdit_UpdateFailed(t *testing.T) {
@@ -195,6 +196,36 @@ func TestRunEdit_UpdateFailed(t *testing.T) {
 	err = runEdit(context.Background(), opts)
 	testutil.RequireError(t, err)
 	testutil.Contains(t, err.Error(), "updating page")
+	testutil.NotContains(t, err.Error(), "updating page: updating page:")
+}
+
+func TestRunEdit_NoContentSource_NoTTY_FailsBeforeAPICall(t *testing.T) {
+	t.Parallel()
+	oldStdinIsTTY := stdinIsTTY
+	stdinIsTTY = func() bool { return false }
+	t.Cleanup(func() { stdinIsTTY = oldStdinIsTTY })
+
+	hits := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	rootOpts := newEditTestRootOptions()
+	rootOpts.Stdin = nil
+	rootOpts.SetAPIClient(api.NewClient(server.URL, "test@example.com", "token"))
+
+	opts := &editOptions{
+		Options: rootOpts,
+		pageID:  "12345",
+	}
+
+	err := runEdit(context.Background(), opts)
+	testutil.RequireError(t, err)
+	testutil.Contains(t, err.Error(), "page content source is required")
+	testutil.NotContains(t, err.Error(), "editor failed")
+	testutil.Equal(t, 0, hits)
 }
 
 func TestRunEdit_VersionIncrement(t *testing.T) {

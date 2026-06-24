@@ -163,6 +163,7 @@ func TestRunCopy_PageNotFound(t *testing.T) {
 	err := runCopy(context.Background(), "99999", opts)
 	testutil.RequireError(t, err)
 	testutil.Contains(t, err.Error(), "copying page")
+	testutil.NotContains(t, err.Error(), "copying page: copying page:")
 }
 
 func TestRunCopy_InvalidOutputFormat(t *testing.T) {
@@ -206,7 +207,8 @@ func TestRunCopy_GetSourcePageFails(t *testing.T) {
 
 	err := runCopy(context.Background(), "invalid", opts)
 	testutil.RequireError(t, err)
-	testutil.Contains(t, err.Error(), "getting source page")
+	testutil.Contains(t, err.Error(), "getting page")
+	testutil.NotContains(t, err.Error(), "getting source page: getting page:")
 }
 
 func TestRunCopy_WithNoAttachments(t *testing.T) {

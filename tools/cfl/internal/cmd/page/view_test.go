@@ -108,6 +108,7 @@ func TestRunView_PageNotFound(t *testing.T) {
 	err := runView(context.Background(), "99999", opts)
 	testutil.RequireError(t, err)
 	testutil.Contains(t, err.Error(), "getting page")
+	testutil.NotContains(t, err.Error(), "getting page: getting page:")
 }
 
 func TestRunView_EmptyContent(t *testing.T) {
@@ -304,6 +305,38 @@ func TestRunView_VersionRaw(t *testing.T) {
 	err := runView(context.Background(), "12345", opts)
 	testutil.RequireNoError(t, err)
 	testutil.Contains(t, rootOpts.Stdout.(*bytes.Buffer).String(), "<p>Historical Raw</p>")
+}
+
+func TestRunView_VersionNewerThanCurrent_PreservesVersionContext(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/v2/pages/12345":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{
+				"id": "12345",
+				"title": "Versioned Page",
+				"version": {"number": 3},
+				"_links": {"webui": "/pages/12345"}
+			}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	rootOpts := newViewTestRootOptions()
+	rootOpts.SetAPIClient(api.NewClient(server.URL, "test@example.com", "token"))
+
+	opts := &viewOptions{
+		Options: rootOpts,
+		version: 10,
+	}
+
+	err := runView(context.Background(), "12345", opts)
+	testutil.RequireError(t, err)
+	testutil.Contains(t, err.Error(), "page version 10 is newer than current version 3")
+	testutil.NotContains(t, err.Error(), "getting page: page version")
 }
 
 func TestRunView_VersionTruncatesByDefault(t *testing.T) {
