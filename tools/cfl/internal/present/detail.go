@@ -7,6 +7,7 @@ import (
 
 	"github.com/open-cli-collective/confluence-cli/api"
 	cflconfig "github.com/open-cli-collective/confluence-cli/internal/config"
+	"github.com/open-cli-collective/confluence-cli/internal/pageview"
 )
 
 type ConfigShowPresenter struct{}
@@ -66,6 +67,73 @@ func (ConfigShowPresenter) PresentDetail(proj cflconfig.ShowProjection) *sharedp
 			&sharedpresent.DetailSection{Fields: fields},
 			stderrInfo(stderr),
 		},
+	}
+}
+
+func (PagePresenter) PresentView(proj pageview.Projection) *sharedpresent.OutputModel {
+	sections := make([]sharedpresent.Section, 0, 3)
+
+	if !proj.ContentOnly {
+		fields := []sharedpresent.Field{
+			{Label: "Title", Value: orDash(proj.Title)},
+			{Label: "ID", Value: orDash(proj.ID)},
+		}
+		switch {
+		case proj.SpaceKey != "" && proj.SpaceID != "":
+			fields = append(fields, sharedpresent.Field{
+				Label: "Space",
+				Value: fmt.Sprintf("%s (ID: %s)", proj.SpaceKey, proj.SpaceID),
+			})
+		case proj.SpaceID != "":
+			fields = append(fields, sharedpresent.Field{
+				Label: "Space ID",
+				Value: proj.SpaceID,
+			})
+		}
+		if proj.HasVersion {
+			fields = append(fields, sharedpresent.Field{
+				Label: "Version",
+				Value: fmt.Sprintf("%d", proj.Version),
+			})
+		}
+		sections = append(sections, &sharedpresent.DetailSection{Fields: fields})
+	}
+
+	if advisory := pageViewAdvisory(proj.Fallback); advisory != "" {
+		sections = append(sections, stderrInfo(advisory))
+	}
+
+	body := pageViewBody(proj)
+	if !proj.ContentOnly {
+		sections = append(sections, stdoutInfo(""))
+	}
+	sections = append(sections, stdoutInfo(body))
+
+	return &sharedpresent.OutputModel{Sections: sections}
+}
+
+func pageViewBody(proj pageview.Projection) string {
+	if !proj.HasContent {
+		return "(No content)"
+	}
+
+	body := proj.Body
+	if proj.Truncated {
+		body += fmt.Sprintf("\n\n... [truncated at %d chars, use --no-truncate for complete text]", pageview.MaxChars)
+	}
+	return body
+}
+
+func pageViewAdvisory(fallback pageview.FallbackKind) string {
+	switch fallback {
+	case pageview.FallbackNone:
+		return ""
+	case pageview.FallbackStorageRaw:
+		return "(Failed to convert to markdown, showing raw HTML)"
+	case pageview.FallbackADFRaw:
+		return "(Failed to convert ADF to markdown, showing raw ADF)"
+	default:
+		return ""
 	}
 }
 
