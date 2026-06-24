@@ -13,6 +13,7 @@ import (
 	"github.com/open-cli-collective/confluence-cli/api"
 	"github.com/open-cli-collective/confluence-cli/internal/cmd/root"
 	"github.com/open-cli-collective/confluence-cli/internal/config"
+	cflpresent "github.com/open-cli-collective/confluence-cli/internal/present"
 )
 
 // mockSearchServer creates a test server for search operations
@@ -93,6 +94,8 @@ func TestRunSearch_EmptyResults(t *testing.T) {
 
 	err := runSearch(context.Background(), opts)
 	testutil.RequireNoError(t, err)
+	testutil.Equal(t, "", rootOpts.Stdout.(*bytes.Buffer).String())
+	testutil.Equal(t, "No results found.\n", rootOpts.Stderr.(*bytes.Buffer).String())
 }
 
 func TestRunSearch_PlainOutput(t *testing.T) {
@@ -101,12 +104,12 @@ func TestRunSearch_PlainOutput(t *testing.T) {
 		"results": [
 			{
 				"content": {"id": "12345", "type": "page", "status": "current", "title": "Test Page"},
-				"resultGlobalContainer": {"title": "DEV"}
+				"resultGlobalContainer": {"title": "DEV", "displayUrl": "/spaces/DEV/pages/12345"}
 			}
 		],
 		"start": 0,
 		"size": 1,
-		"totalSize": 1
+		"totalSize": 2
 	}`)
 	defer server.Close()
 
@@ -123,12 +126,32 @@ func TestRunSearch_PlainOutput(t *testing.T) {
 
 	err := runSearch(context.Background(), opts)
 	testutil.RequireNoError(t, err)
+	testutil.Equal(t, "ID\tTYPE\tSPACE\tTITLE\n12345\tpage\tDEV\tTest Page\n", rootOpts.Stdout.(*bytes.Buffer).String())
+	testutil.Equal(t, "(showing 1 of 2 results, use --limit to see more)\n", rootOpts.Stderr.(*bytes.Buffer).String())
 }
 
-func TestRunSearch_InvalidOutputFormat(t *testing.T) {
+func TestRunSearch_FullPlainOutputExact(t *testing.T) {
 	t.Parallel()
+	server := mockSearchServer(t, `{
+		"results": [
+			{
+				"content": {"id": "12345", "type": "page", "status": "current", "title": "Test Page"},
+				"resultGlobalContainer": {"title": "DEV", "displayUrl": "/spaces/DEV/pages/12345"},
+				"lastModified": "2024-02-03",
+				"url": "/wiki/spaces/DEV/pages/12345"
+			}
+		],
+		"start": 0,
+		"size": 1,
+		"totalSize": 1
+	}`)
+	defer server.Close()
+
 	rootOpts := newTestRootOptions()
-	rootOpts.Output = "invalid"
+	rootOpts.Output = "plain"
+	rootOpts.Full = true
+	client := api.NewClient(server.URL, "test@example.com", "token")
+	rootOpts.SetAPIClient(client)
 
 	opts := &searchOptions{
 		Options: rootOpts,
@@ -137,8 +160,40 @@ func TestRunSearch_InvalidOutputFormat(t *testing.T) {
 	}
 
 	err := runSearch(context.Background(), opts)
-	testutil.RequireError(t, err)
-	testutil.Contains(t, err.Error(), "invalid output format")
+	testutil.RequireNoError(t, err)
+	testutil.Equal(t, "ID\tTYPE\tSPACE\tTITLE\tMODIFIED\tURL\n12345\tpage\tDEV\tTest Page\t2024-02-03\t/wiki/spaces/DEV/pages/12345\n", rootOpts.Stdout.(*bytes.Buffer).String())
+	testutil.Equal(t, "", rootOpts.Stderr.(*bytes.Buffer).String())
+}
+
+func TestRunSearch_TableOutputExact(t *testing.T) {
+	t.Parallel()
+	server := mockSearchServer(t, `{
+		"results": [
+			{
+				"content": {"id": "12345", "type": "page", "status": "current", "title": "Test Page"},
+				"resultGlobalContainer": {"title": "DEV", "displayUrl": "/spaces/DEV/pages/12345"}
+			}
+		],
+		"start": 0,
+		"size": 1,
+		"totalSize": 1
+	}`)
+	defer server.Close()
+
+	rootOpts := newTestRootOptions()
+	client := api.NewClient(server.URL, "test@example.com", "token")
+	rootOpts.SetAPIClient(client)
+
+	opts := &searchOptions{
+		Options: rootOpts,
+		query:   "test",
+		limit:   25,
+	}
+
+	err := runSearch(context.Background(), opts)
+	testutil.RequireNoError(t, err)
+	testutil.Equal(t, "ID     TYPE  SPACE  TITLE\n12345  page  DEV    Test Page\n", rootOpts.Stdout.(*bytes.Buffer).String())
+	testutil.Equal(t, "", rootOpts.Stderr.(*bytes.Buffer).String())
 }
 
 func TestRunSearch_InvalidType(t *testing.T) {
@@ -590,7 +645,7 @@ func TestExtractSpaceKey(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := extractSpaceKey(tt.displayURL)
+			got := cflpresent.ExtractSpaceKey(tt.displayURL)
 			testutil.Equal(t, tt.want, got)
 		})
 	}
