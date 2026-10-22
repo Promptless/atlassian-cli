@@ -25,15 +25,6 @@ type ProjectDetail struct {
 	URL            string      `json:"url,omitempty"`
 }
 
-// Version represents a Jira project version. Only the fields needed for the
-// `projects get` count-column rendering are decoded here; additional fields
-// (releaseDate, released, archived, etc.) can be added when a version-focused
-// command lands.
-type Version struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-}
-
 // ProjectSearchResponse represents the paginated response from project search
 type ProjectSearchResponse struct {
 	MaxResults int             `json:"maxResults"`

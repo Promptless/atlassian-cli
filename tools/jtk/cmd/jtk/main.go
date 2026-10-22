@@ -36,6 +36,7 @@ import (
 	"github.com/open-cli-collective/jira-ticket-cli/internal/cmd/sprints"
 	"github.com/open-cli-collective/jira-ticket-cli/internal/cmd/transitions"
 	"github.com/open-cli-collective/jira-ticket-cli/internal/cmd/users"
+	"github.com/open-cli-collective/jira-ticket-cli/internal/cmd/versions"
 )
 
 func main() {
@@ -76,6 +77,7 @@ func run(ctx context.Context) error {
 	projects.Register(rootCmd, opts)
 	sprints.Register(rootCmd, opts)
 	users.Register(rootCmd, opts)
+	versions.Register(rootCmd, opts)
 	me.Register(rootCmd, opts)
 	refresh.Register(rootCmd, opts)
 	setcredential.Register(rootCmd, opts)

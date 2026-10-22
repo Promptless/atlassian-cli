@@ -65,7 +65,7 @@ jtk [resource] [action] [KEY/ID] [flags]
 | `jtk issues update PROJ-123 --assignee none` | Unassign via update |
 | `jtk issues assign PROJ-123 VALUE` | Dedicated assign command; same resolver inputs as `--assignee` (user is a positional arg, not a flag) |
 | `jtk issues assign PROJ-123 --unassign` | Unassign via dedicated command (equivalent to `--assignee none` on update) |
-| `jtk issues move PROJ-1 [PROJ-2 ...] --to-project NEWPROJ` | Move one or more issues to another project (Jira Cloud only). By default synchronous — waits for completion. Max 1000 issues per request. See move flags below |
+| `jtk issues move PROJ-1 [PROJ-2 ...] --to-project NEWPROJ` | Move up to 1000 issues to another Jira Cloud project and wait for completion by default. See Move Flags |
 | `jtk issues move-status TASK_ID` | Check status of an async move operation (used with `--no-wait`) |
 | `jtk issues delete PROJ-123` | Permanently delete an issue. Interactive `y/N` prompt by default (prompt goes to stderr, reads from stdin); pass `--force` to skip. Destructive and irreversible |
 | `jtk issues types --project KEY` | List valid issue types for a project (columns: `ID`, `NAME`, `SUBTASK`; use values from `NAME` as `--type` on create). Supports `--id`, `--extended` (adds `DESCRIPTION_KEY`) |
@@ -90,7 +90,7 @@ jtk [resource] [action] [KEY/ID] [flags]
 |------|-------------|
 | `--summary "TEXT"` / `-s` | New summary |
 | `--description "TEXT"` / `-d` | New description |
-| `--assignee VALUE` / `-a` | Reassign (resolver accepts `me`, email, display name, or raw account ID; use `none` to unassign). Note: `jtk issues update --help` flag text underclaims the resolver (omits display name) — the resolver implementation accepts all four, same as `issues create` and `issues assign` |
+| `--assignee VALUE` / `-a` | Reassign using `me`, email, display name, or raw account ID. Use `none` to unassign |
 | `--type TYPE` / `-t` | Change issue type (uses bulk move API) |
 | `--parent KEY` | Change parent/epic |
 | `--field NAME=VALUE` / `-f` | Update custom field (repeatable; repeating the same key accumulates values for multi-select fields) |
@@ -149,6 +149,20 @@ Common transition names: "To Do", "In Progress", "In Review", "Done" (instance-d
 |---------|-------------|
 | `jtk projects list` | List all projects (columns: `KEY`, `TYPE`, `LEAD`, `NAME`). Supports `--id`, `--fields`, `--extended` (adds `STYLE`, `ISSUE_TYPES`, `COMPONENTS` counts), `--next-page-token` |
 | `jtk projects get KEY` | Get project details. Supports `--id`, `--fields`, `--extended` (enumerates components) |
+
+## Versions
+
+Use `jtk versions get <version-id>` when a release or fix-version task gives a numeric Jira version ID. It returns the version name, project ID, release state, dates, and fixed, affected, and custom-field issue counts. The `ver` alias is also available.
+
+| Command | Description |
+|---------|-------------|
+| `jtk versions get 10000` | Read version metadata and related issue counts |
+| `jtk versions get 10000 --fields NAME,PROJECT_ID,FIXED_ISSUES` | Select fields; the version ID is always included |
+| `jtk versions get 10000 --extended` | Include the version API URL and full description |
+| `jtk versions get 10000 --fulltext` | Read the full description |
+| `jtk versions get 10000 --id` | Verify the version and return its ID without fetching counts |
+
+These reads support basic and bearer authentication. They require Browse Projects permission for the version's project. OAuth requires classic `read:jira-work`; granular scopes are `read:project-version:jira` and `read:field:jira` for counts. A 404 can mean an absent or inaccessible version. An empty issue search alone does not establish that a version is empty; inspect its metadata and counts before concluding.
 
 ## Sprints
 
@@ -224,7 +238,7 @@ Common transition names: "To Do", "In Progress", "In Review", "Done" (instance-d
 
 - Data goes to stdout (pipeable)
 - Diagnostics/logs go to stderr
-- **Pagination continuation notices (`More results available ...`) go to STDOUT, not stderr** — this is intentional per `jtk`'s output contract, and applies even with `--id`. When using `--id` in command substitution or piping to a tool that reads line-by-line, size `--max` to match your expectation, or post-filter with `grep -oE '[A-Z]+-[0-9]+' | head -1` (or equivalent) to isolate just the identifier from any trailing notice.
+- Pagination continuation notices (`More results available ...`) go to stdout, including with `--id`. When consuming identifiers in a script, set `--max` to the expected result count. To remove trailing notices from issue-key output, filter with `grep -oE '[A-Z]+-[0-9]+' | head -1` or an equivalent command.
 - Use `--id` global flag for just the primary identifier — works on both reads and mutations (useful when piping to another command; note the pagination caveat above)
 - **Mutation output:** non-destructive mutations (create, update, assign, transition, add) re-fetch the entity after writing and show the same detail block as the corresponding `get` command. Destructive mutations (delete, remove) emit a confirmation line only. `--id` on any mutation emits just the primary identifier (issue key, comment ID, etc.)
 - Use `--fulltext` global flag to disable truncation of descriptions/comments. `--fulltext` is a no-op when the body field is not selected via `--fields`
@@ -233,7 +247,7 @@ Common transition names: "To Do", "In Progress", "In Review", "Done" (instance-d
 
 ## Scope of This Reference
 
-This reference covers `jtk`'s daily-use operator surface — issues, transitions, links, sprints, boards, comments, attachments, projects, users. It intentionally does **not** cover administrative surfaces, which are out of scope for the workflows in this skill:
+This reference covers daily Jira operations: issues, transitions, links, sprints, boards, comments, attachments, projects, versions, and users. The following administrative commands fall outside this skill's workflows:
 
 - `jtk fields` — custom field management (create, delete, restore, show, contexts, options). Note: `--custom` was renamed to `--custom-fields` on `fields list` in v1.0.84
 - `jtk dashboards` — dashboard and gadget management

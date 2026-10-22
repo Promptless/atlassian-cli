@@ -1039,6 +1039,29 @@ jtk projects get 10001
 
 ---
 
+### `jtk versions get <version-id>`
+
+Read a Jira version's name, project ID, release state, dates, description, and related issue
+counts. This command accepts a numeric version ID, including one from a Jira release URL.
+
+```bash
+jtk versions get 10000
+jtk versions get 10000 --fields NAME,PROJECT_ID,FIXED_ISSUES
+jtk versions get 10000 --extended
+jtk versions get 10000 --id
+```
+
+The default output includes fixed, affected, and custom-field issue counts. `--extended`
+adds the API URL and keeps the full description; `--fulltext` also keeps the full description.
+`--id` verifies the version and skips the counts request. `ver` is an alias for `versions`.
+
+The reads work with basic and OAuth bearer authentication. Both require Browse Projects
+permission for the version's project. OAuth uses classic `read:jira-work`; granular scopes
+are `read:project-version:jira` and, for issue counts, `read:field:jira`.
+A not-found response can mean the version is absent or the account cannot see it.
+
+---
+
 ### `jtk projects create`
 
 Create a new Jira project.
