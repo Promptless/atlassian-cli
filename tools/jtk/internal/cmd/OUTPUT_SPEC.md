@@ -217,6 +217,23 @@ customer_service | Customer Service | jcs.project.type.customer.service.descript
 business | Business | jira.project.type.business.description
 ```
 
+### `versions`
+
+**`versions get 10000`** — default:
+```
+10000  Release 1
+Project ID: 10001   Released: yes   Archived: no
+Start date: -   Release date: 2026-10-22
+Fix version issues: 3   Affected version issues: 1   Custom field issues: 0
+```
+
+A non-empty description appears last and truncates after 500 characters. `--fulltext` or
+`--extended` retains the full description. Extended output also includes `URL`.
+`--fields` selects from `ID`, `NAME`, `PROJECT_ID`, `RELEASED`, `ARCHIVED`, `START_DATE`,
+`RELEASE_DATE`, `FIXED_ISSUES`, `AFFECTED_ISSUES`, `CUSTOM_FIELD_ISSUES`, `DESCRIPTION`, and
+`URL` (extended only). `--id` verifies the version, prints its ID, and skips issue counts.
+Provider failures or missing counts produce an error rather than an empty-version result.
+
 ### `issues`
 
 **`issues list`** — default:
